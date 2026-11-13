@@ -66,6 +66,28 @@ cd "$XEMB" && $PY -m scripts.analysis.homebody_kitchen.twin --homebody-root "$HO
 
 The two differ by about 30 cm and 7.6°. Main's sweep and population code still uses `droid_real_v1`.
 
+## Google Drive
+
+Collected trajectories go to Drive with rclone (`scripts/push_to_drive.sh`). rclone is in its own micromamba env:
+
+```bash
+MAMBA_ROOT_PREFIX=~/micromamba ~/.local/bin/micromamba create -y -n tools -c conda-forge rclone
+```
+
+Connect it once (opens a browser to sign in and approve). `drive.file` lets rclone see only the files it uploads;
+use `scope=drive` instead to push into a folder someone else shared with you:
+
+```bash
+~/micromamba/envs/tools/bin/rclone config create gdrive drive scope=drive.file
+```
+
+Then push any run directory (copied under `gdrive:help-your-robot/trajectories/`, verified by size and MD5, never
+deleting on Drive; `HELP_DRIVE_ROOT` and `HELP_DRIVE_REMOTE` override the destination):
+
+```bash
+source env.sh && scripts/push_to_drive.sh $MLSPACES_ARTIFACT_ROOT/smoke/datagen/open_planner_v1/debug/droid_open_debug1
+```
+
 ## Open problems
 
 - Which station pose is right needs a real frame overlaid on the render (the D435 and ZED 2i views).
