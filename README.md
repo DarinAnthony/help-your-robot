@@ -66,6 +66,78 @@ cd "$XEMB" && $PY -m scripts.analysis.homebody_kitchen.twin --homebody-root "$HO
 
 The two differ by about 30 cm and 7.6°. Main's sweep and population code still uses `droid_real_v1`.
 
+## Robots and tasks
+
+`$PY scripts/build_robots.py` builds both identified robots from xemb's `task_set.DEPLOYMENT_ROBOTS` into
+`$MLSPACES_ARTIFACT_ROOT/robots/<name>/` (`model.xml`, `params.json`).
+
+| Robot | Task | Where | Recipe |
+|---|---|---|---|
+| `droid_panda` (stock DROID on the real Panda's working joint range, arm gravity-compensated) | Shelf pick and place | The door-session cart `droid_corner_20261029` (8.188, 0.379, 0.848, yaw 40.6°); `upper_return`'s middle shelf (z 1.5065), the reachable front half (x 8.975-9.03, y 0.40-0.74) | help!'s scripted expert, `helpsim/tasks/shelf_pnp.py` |
+| `tidybot_xarm7_measured` (rig `tidybot_xarm7_20261111`) | Drawer opening, base-driven | `drawer/glass_counter__stack_b_3_front` from (7.76149, -1.73157, yaw -1.04°) | xemb's kino planner on the identified command path (`--measured_command_path`, your 2026-10-27 handoff recipe with `base_pull`) |
+
+Why these choices:
+- **The DROID cannot reach any upper cabinet from the island station** (3.7-4.4 m away; `scripts/shelf_reach.py`). The
+  door-session cart reaches 5 of 15 cells on the middle shelf, all at the front; none on the top shelf.
+- **xemb's pick-and-place samplers** can neither pin the base nor use cabinet shelves (they are not placement
+  surfaces), so the shelf task is help!'s own scripted expert: a level approach with the jaws horizontal, Cartesian
+  waypoints by IK, the stock position servos, and up to 3 attempts. A retry swings the approach 15-30°, which turns
+  the jaws across a long object, and perturbs the grasp point.
+- **Gravity compensation is required** (`kitchen_station.build_spec(gravcomp=True)`). Without it the arm sags about 1 cm,
+  the open fingers press 450 N into the shelf, and the servos stall at the Panda's 87 N·m limit, 10 cm short of the
+  target. (The stock DROID open smoke's 0/12 looked the same but has another cause: xemb's arm rate limiter with its
+  default `arm_velocity_limit_reference: measured_qpos` leaves the arm halfway along each segment;
+  `--policy_config_json '{"arm_velocity_limit_reference": "previous_command", "mpc_time_cap": "replans_v1"}'` fixes
+  it; see the smoke row above.)
+- **The TidyBot on stock servos failed** (0 of 12; the demo stance is 0.92 m from the handle and IK fails for the
+  pregrasp). On the identified command path with the base pulling it opened 2 of 2 (drawer +28 cm, base travel 34 cm).
+  xemb has made that path reproduction-only for its *population* collections; plain `run_pipeline.py` runs it.
+
+Shelf pick-and-place outcomes per attempt: `success`, `unreachable` (with the failing phase), `grasp_miss`, `slip`,
+`place_miss`, `off_shelf`. Pilot (6 episodes each): tomato 6/6; egg, drumstick, wooden ball, orange 5/6; banana,
+waffle, sponge, duster and tape mostly fail (too wide for the 85 mm jaws when lying flat, as on the real gripper);
+metal spoon 0/6.
+
+Object split (`scripts/collect_shelf_pnp.py`):
+
+| Split | Objects | Why |
+|---|---|---|
+| `train` | tomato, egg, drumstick, wooden ball, banana, waffle, sponge, duster, tape | Successes and failures, so a success predictor has both |
+| `heldout_in_distribution` | orange | Round and sized like the tomato, ball and egg: should mostly be attempted |
+| `heldout_hard` | metal spoon | Thin and flat on the shelf: should trigger asking |
+
+Not used: the wooden spoon (the same failure category as the held-out spoon) and the plate (wider than the shelf).
+The drawer task's hard evaluation drawer is not built yet: xemb's per-part friction hooks run only on the command
+path (`randomization.py`); the plan is a high-friction and a locked (`.../slide` range clamped) variant of the demo
+drawer.
+
+### Collected data
+
+Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Drive as
+`stanford/classes/cs238/data/shelf_pnp_droid_20261113`):
+
+| Split | Object | Success | Succeeded on a retry |
+|---|---|---|---|
+| train | wooden ball | 22/25 | 2 |
+| train | tomato | 21/25 | 3 |
+| train | egg | 19/25 | 4 |
+| train | drumstick | 18/25 | 2 |
+| train | waffle | 7/25 | 0 |
+| train | sponge | 6/25 | 0 |
+| train | duster | 4/25 | 1 |
+| train | banana | 1/25 | 1 |
+| train | tape | 0/25 | 0 |
+| heldout_in_distribution | orange | 21/25 | 2 |
+| heldout_hard | metal spoon | 0/25 | 0 |
+
+| Run | Command | Layout |
+|---|---|---|
+| `data/shelf_pnp/20261113` | `$PY scripts/collect_shelf_pnp.py --out data/shelf_pnp/20261113 --episodes 25` | `<split>/<object>/ep_<seed>.npz` (per 15 Hz tick: arm joints and targets, gripper, TCP pose, object pose, phase, attempt; `frame_tick`), `ep_<seed>_{cam_cabinet,wrist_camera}.mp4` (5 Hz), `episodes.jsonl` (outcome of every attempt) |
+| `$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/tidybot_open_20261113` | the TidyBot recipe above, `--samples_per_house 20 --seed 3 --no_filter` | xemb's H5: `house_0/trajectories_batch_*.h5`, one `traj_i` per episode (obs, actions, per-step success) |
+
+`cam_cabinet` is a synthetic third-person view of the shelf. The record's ZED 2i is calibrated for the island
+station, and from the cart it sees the counter.
+
 ## Google Drive
 
 Collected trajectories go to Drive with rclone (`scripts/push_to_drive.sh`). rclone is in its own micromamba env:
