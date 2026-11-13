@@ -47,6 +47,11 @@ STATIONS = {
     # (droid_panda_20261109 geometry.base_xy_yaw_in_kitchen; z is the measured 0.867, 5 cm below the island top).
     "droid_20261109": Station(6.553007603421816, -2.2443711587430326, 0.867, 85.94809750041327,
                               "droid_panda_20261109", "droid_panda_20261109 geometry.base_xy_yaw_in_kitchen"),
+    # The cart facing the return wall's uppers in the 2026-10-28/29 door sessions (notes/20261029_src_kitchen_cabinet_
+    # door_measured.md, ~/droid/sysid/results/kitchen_pose_corner.json): it opened upper_return::door_1_front from here.
+    # Frame not recorded beyond "twin"; treat as approximate until a real frame is overlaid.
+    "droid_corner_20261029": Station(8.188, 0.379, 0.848, 40.6, "droid_panda_20261109",
+                                     "notes/20261029_src_kitchen_cabinet_door_measured.md (door-session cart)"),
     # Main's station (house_tasks.SWEEP_BASES["droid_real_v1"]), localized from the 2026-10-29 episodes.
     "droid_real_v1": Station(6.7159, -2.4872, 0.862, 93.572, "droid_panda_20261103",
                              "house_tasks.SWEEP_BASES['droid_real_v1'] / droid_panda_20261103"),
