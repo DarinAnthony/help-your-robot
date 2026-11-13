@@ -74,15 +74,18 @@ Collected trajectories go to Drive with rclone (`scripts/push_to_drive.sh`). rcl
 MAMBA_ROOT_PREFIX=~/micromamba ~/.local/bin/micromamba create -y -n tools -c conda-forge rclone
 ```
 
-Connect it once (opens a browser to sign in and approve). `drive.file` lets rclone see only the files it uploads;
-use `scope=drive` instead to push into a folder someone else shared with you:
+Connect it once (opens a browser to sign in and approve). The data folder already exists in Drive, so rclone needs
+full Drive access (`scope=drive`); `drive.file` would only see folders rclone itself created:
 
 ```bash
-~/micromamba/envs/tools/bin/rclone config create gdrive drive scope=drive.file
+~/micromamba/envs/tools/bin/rclone config create gdrive drive scope=drive
+# an existing drive.file remote: widen it and re-authorize
+~/micromamba/envs/tools/bin/rclone config update gdrive scope drive && ~/micromamba/envs/tools/bin/rclone config reconnect gdrive:
 ```
 
-Then push any run directory (copied under `gdrive:help-your-robot/trajectories/`, verified by size and MD5, never
-deleting on Drive; `HELP_DRIVE_ROOT` and `HELP_DRIVE_REMOTE` override the destination):
+Then push any run directory. It is copied under `gdrive:stanford/classes/cs238/data/<run name>`, verified by size and
+MD5, and nothing on Drive is deleted. `HELP_DRIVE_ROOT` and `HELP_DRIVE_REMOTE` override the destination; the script
+refuses a root rclone cannot see rather than creating a duplicate (`HELP_DRIVE_CREATE_ROOT=1` creates it):
 
 ```bash
 source env.sh && scripts/push_to_drive.sh $MLSPACES_ARTIFACT_ROOT/smoke/datagen/open_planner_v1/debug/droid_open_debug1
