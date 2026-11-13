@@ -69,8 +69,12 @@ def _vfov_deg(lens: dict) -> float:
     return math.degrees(2 * math.atan(lens["height"] / 2 / lens["K"][1][1]))
 
 
-def build_spec(station: str = "droid_20261109") -> mujoco.MjSpec:
-    """The twin with the DROID at ``STATIONS[station]``, uncompiled."""
+def build_spec(station: str = "droid_20261109", gravcomp: bool = True) -> mujoco.MjSpec:
+    """The twin with the DROID at ``STATIONS[station]``, uncompiled.
+
+    gravcomp: the arm's bodies are gravity-compensated, as the real Franka controller does (xemb's
+    ``--robot_gravcomp``). Without it the stock position servos let the outstretched arm sag about 1 cm at the upper
+    cabinet, enough to drag the open fingers on the shelf."""
     st = STATIONS[station]
     cams = record(st.record)["cameras"]
     spec = mujoco.MjSpec.from_file(str(twin_dir() / "scene.xml"))
@@ -92,6 +96,10 @@ def build_spec(station: str = "droid_20261109") -> mujoco.MjSpec:
     frame = spec.worldbody.add_frame(pos=[st.x, st.y, st.z], quat=[math.cos(half), 0, 0, math.sin(half)])
     frame.attach_body(robot.worldbody.first_body(), PREFIX, "")  # the fr3 class body holding fr3_link0 at its origin
     spec.camera(f"{PREFIX}gripper/wrist_camera").fovy = _vfov_deg(cams["wrist"]["lens_parameters"])
+    if gravcomp:
+        for body in spec.bodies:
+            if body.name.startswith(PREFIX):
+                body.gravcomp = 1.0
     return spec
 
 
