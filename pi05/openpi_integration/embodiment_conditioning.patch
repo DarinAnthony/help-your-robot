@@ -1,0 +1,190 @@
+diff --git a/src/openpi/training/config.py b/src/openpi/training/config.py
+--- a/src/openpi/training/config.py
++++ b/src/openpi/training/config.py
+@@ -93,4 +93,8 @@ class DataConfig:
+     # Only used for RLDS data loader (ie currently only used for DROID).
+     rlds_data_dir: str | None = None
++    # Optional MolmoSpaces embodiment prompt conditioning. "none" preserves the
++    # historical prompt byte-for-byte; "id" is a memorization sanity check;
++    # "text" uses controller and morphology metadata and can describe unseen robots.
++    embodiment_conditioning: str = "none"
+     # Action space for DROID dataset.
+     action_space: droid_rlds_dataset.DroidActionSpace | None = None
+@@ -565,6 +569,7 @@ class RLDSMolmoSpacesDataConfig(DataConfigFactory):
+ 
+     rlds_data_dir: str | None = None
+     datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
++    embodiment_conditioning: str = "none"
+ 
+     @override
+     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+@@ -590,5 +595,6 @@ class RLDSMolmoSpacesDataConfig(DataConfigFactory):
+         return dataclasses.replace(
+             self.create_base_config(assets_dirs, model_config),
+             rlds_data_dir=self.rlds_data_dir,
++            embodiment_conditioning=self.embodiment_conditioning,
+             datasets=self.datasets,
+             repack_transforms=repack_transform,
+@@ -1175,5 +1181,33 @@ _CONFIGS = [
+         log_interval=50,
+         num_workers=0,
+     ),
++    # Explicit opt-in experiment: identical to pi05_scale_emb_v3_lora except
++    # that robot/controller/morphology metadata is prepended to the text prompt.
++    TrainConfig(
++        name="pi05_scale_emb_v3_text_lora",
++        model=pi0_config.Pi0Config(pi05=True, action_horizon=32, discrete_state_input=True,
++                                   paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
++        data=RLDSMolmoSpacesDataConfig(
++            repo_id="pi05_scale_emb_v3",
++            rlds_data_dir="/iris/u/boai/data/rlds_scale_embodiments_v3",
++            datasets=(droid_rlds_dataset.RLDSDataset(name="molmospaces_emb_mix", version="1.0.0", weight=1.0),),
++            embodiment_conditioning="text",
++        ),
++        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
++        checkpoint_base_dir="/iris/u/boai/pi05_ckpts_local",
++        project_name="embodiment-scaling-manipulation",
++        num_train_steps=4_000,
++        batch_size=128,
++        fsdp_devices=1,
++        keep_period=500,
++        freeze_filter=pi0_config.Pi0Config(pi05=True, action_horizon=32, discrete_state_input=True,
++                                           paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora").get_freeze_filter(),
++        ema_decay=None,
++        lr_schedule=_optimizer.CosineDecaySchedule(warmup_steps=300, peak_lr=1e-4, decay_steps=6_000, decay_lr=1e-4),
++        optimizer=_optimizer.AdamW(clip_gradient_norm=1.0),
++        save_interval=500,
++        log_interval=50,
++        num_workers=0,
++    ),
+     TrainConfig(
+         name="pi05_lowvar_v2",
+diff --git a/src/openpi/training/data_loader.py b/src/openpi/training/data_loader.py
+--- a/src/openpi/training/data_loader.py
++++ b/src/openpi/training/data_loader.py
+@@ -167,5 +167,6 @@ def create_rlds_dataset(
+             datasets=data_config.datasets,
+             shuffle=shuffle,
+             action_chunk_size=action_horizon,
++            embodiment_conditioning=data_config.embodiment_conditioning,
+         )
+     return DroidRldsDataset(
+diff --git a/src/openpi/training/molmospaces_rlds_dataset.py b/src/openpi/training/molmospaces_rlds_dataset.py
+--- a/src/openpi/training/molmospaces_rlds_dataset.py
++++ b/src/openpi/training/molmospaces_rlds_dataset.py
+@@ -9,6 +9,9 @@ Emits FLAT keys {image, wrist_image, state, actions, prompt} so the LIBERO repac
+ from collections.abc import Sequence
+ import dataclasses
+ 
++from openpi.training.embodiment_conditioning import condition_prompt
++from openpi.training.embodiment_conditioning import SUPPORTED_CONDITIONING_MODES
++
+ 
+ @dataclasses.dataclass
+ class RLDSDataset:
+@@ -31,5 +34,6 @@ class MolmoSpacesRldsDataset:
+         num_parallel_reads: int = -1,
+         num_parallel_calls: int = -1,
++        embodiment_conditioning: str = "none",
+     ):
+         import dlimp as dl
+         import tensorflow as tf
+@@ -38,5 +42,10 @@ class MolmoSpacesRldsDataset:
+ 
+         tf.config.set_visible_devices([], "GPU")
+         assert abs(sum(d.weight for d in datasets) - 1.0) < 1e-6, "dataset weights must sum to 1.0"
++        if embodiment_conditioning not in SUPPORTED_CONDITIONING_MODES:
++            raise ValueError(
++                f"Unknown embodiment conditioning mode {embodiment_conditioning!r}; "
++                f"expected one of {SUPPORTED_CONDITIONING_MODES}"
++            )
+ 
+         def prepare(cfg):
+@@ -54,5 +63,36 @@ class MolmoSpacesRldsDataset:
+                 md = traj["traj_metadata"]["episode_metadata"]
+                 # authoritative prompt, e.g. "open the drawer" (NOT the legacy language string)
+                 prompt = tf.strings.join([md["task"], tf.fill([traj_len], " the "), md["target"]])
++                if embodiment_conditioning != "none":
++                    # dlimp repeats episode metadata over the trajectory. Format it
++                    # once per episode in Python (JSON parsing), then broadcast.
++                    def first(key, default):
++                        return md[key][0] if key in md else tf.constant(default)
++
++                    def format_conditioned(task, target, robot, action_space, params, emb_id, variant):
++                        values = []
++                        for value in (task, target, robot, action_space, params, emb_id, variant):
++                            values.append(value.numpy() if hasattr(value, "numpy") else value)
++                        task, target, robot, action_space, params, emb_id, variant = values
++                        base = task.decode() + " the " + target.decode()
++                        return condition_prompt(
++                            base,
++                            mode=embodiment_conditioning,
++                            robot=robot,
++                            action_space=action_space,
++                            embodiment_params=params,
++                            embodiment_id=emb_id,
++                            variant=variant,
++                        ).encode()
++
++                    conditioned = tf.py_function(
++                        format_conditioned,
++                        inp=[first("task", b""), first("target", b""), first("robot", b""),
++                             first("action_space", b"joint"), first("embodiment_params", b""),
++                             first("embodiment_id", -1), first("variant", b"")],
++                        Tout=tf.string,
++                    )
++                    conditioned.set_shape(())
++                    prompt = tf.fill([traj_len], conditioned)
+                 return {
+                     "actions": traj["action"],                       # (T,10) delta joints + abs gripper
+diff --git a/scripts/pi05_eval_server.py b/scripts/pi05_eval_server.py
+--- a/scripts/pi05_eval_server.py
++++ b/scripts/pi05_eval_server.py
+@@ -37,2 +37,3 @@ from openpi.policies import policy_config as _policy_config
+ from openpi.shared import download as _download
+ import openpi.transforms as _transforms
++from openpi.training.embodiment_conditioning import condition_prompt
+@@ -51,3 +52,4 @@ class Pi05Server:
+         ckpt = _download.maybe_download(str(checkpoint_dir))
+         data_config = cfg.data.create(cfg.assets_dirs, cfg.model)
++        self.embodiment_conditioning = getattr(data_config, "embodiment_conditioning", "none")
+         norm_stats = _checkpoints.load_norm_stats(ckpt / "assets", data_config.asset_id)
+@@ -63,7 +65,13 @@ class Pi05Server:
+         self._lock = threading.Lock()
+-        log.info("pi05 policy ready.")
++        log.info("pi05 policy ready (embodiment_conditioning=%s).", self.embodiment_conditioning)
+ 
+-    def _infer_single(self, image, wrist, state, prompt):
++    def _infer_single(self, image, wrist, state, prompt, embodiment_id=-1, embodiment_descriptor=""):
+         # create_trained_policy does NOT apply the data config's RepackTransform, so feed the
+         # post-repack "observation/*" keys that LiberoInputs consumes directly.
++        prompt = condition_prompt(
++            prompt,
++            mode=self.embodiment_conditioning,
++            embodiment_id=embodiment_id,
++            descriptor=embodiment_descriptor,
++        )
+         inp = {
+@@ -96,5 +104,20 @@ class Pi05Server:
+             proprio = proprio.reshape(1, -1)
+         B = img_p.shape[0]
+-        acts = [self._infer_single(img_p[i], img_w[i], proprio[i], langs[i % len(langs)])
+-                for i in range(B)]
++        def batch_values(key, default):
++            value = obs.get(key, default)
++            array = np.asarray(value)
++            if array.ndim == 0:
++                return [array.item()] * B
++            return list(array)
++
++        embodiment_ids = batch_values("embodiment_id", -1)
++        descriptors = batch_values("embodiment_descriptor", "")
++        descriptors = [d.decode() if isinstance(d, (bytes, bytearray)) else str(d) for d in descriptors]
++        acts = [
++            self._infer_single(
++                img_p[i], img_w[i], proprio[i], langs[i % len(langs)],
++                embodiment_ids[i % len(embodiment_ids)], descriptors[i % len(descriptors)],
++            )
++            for i in range(B)
++        ]
+         actions = np.stack(acts, 0)                   # (B, horizon, 10)
