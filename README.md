@@ -130,6 +130,10 @@ Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Driv
 | heldout_in_distribution | orange | 21/25 | 2 |
 | heldout_hard | metal spoon | 0/25 | 0 |
 
+TidyBot drawer opening, `tidybot_open_20261113`: **20/20** opened (on Drive as
+`stanford/classes/cs238/data/drawer_open_tidybot_20261113`). All successes on the nominal drawer, so failure data for
+this task has to come from the hard evaluation drawer (high friction, locked), not yet built.
+
 | Run | Command | Layout |
 |---|---|---|
 | `data/shelf_pnp/20261113` | `$PY scripts/collect_shelf_pnp.py --out data/shelf_pnp/20261113 --episodes 25` | `<split>/<object>/ep_<seed>.npz` (per 15 Hz tick: arm joints and targets, gripper, TCP pose, object pose, phase, attempt; `frame_tick`), `ep_<seed>_{cam_cabinet,wrist_camera}.mp4` (5 Hz), `episodes.jsonl` (outcome of every attempt) |
