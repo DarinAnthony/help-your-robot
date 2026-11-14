@@ -10,6 +10,11 @@ The research plan is [`PLAN.md`](PLAN.md); this file covers setup and what has b
 | `env.sh` | Paths and environment for every command (`source env.sh`, then use `$PY`) |
 | `helpsim/envs/kitchen_station.py` | The installed twin with the DROID at a measured station pose and the record's cameras |
 | `scripts/station_check.py` | M0 check: penetration at home, renders from the station's cameras |
+| `scripts/collect_drawer_open.sh` | The TidyBot drawer-opening collection, on the nominal drawer or a variant |
+| `scripts/make_drawer_variants.py` | Hard and locked copies of the twin's demo drawer, with a push test of each |
+| `scripts/run_pipeline_hooked.py`, `helpsim/xemb_hooks.py` | xemb's `run_pipeline.py` with help!'s hooks: the variant's drawer values, the TidyBot's own cameras for the preview videos |
+| `scripts/export_drawer_sessions.sh` | Drawer episodes as hub sessions through the TidyBot's calibrated cameras (xemb's `session_export`) |
+| `scripts/contact_sheet.py` | Frames across time from episode videos as one PNG, for a quick look |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |
 | `data/` | Generated outputs (git-ignored) |
 
@@ -74,7 +79,7 @@ The two differ by about 30 cm and 7.6°. Main's sweep and population code still 
 | Robot | Task | Where | Recipe |
 |---|---|---|---|
 | `droid_panda` (stock DROID on the real Panda's working joint range, arm gravity-compensated) | Shelf pick and place | The door-session cart `droid_corner_20261029` (8.188, 0.379, 0.848, yaw 40.6°); `upper_return`'s middle shelf (z 1.5065), the reachable front half (x 8.975-9.03, y 0.40-0.74) | help!'s scripted expert, `helpsim/tasks/shelf_pnp.py` |
-| `tidybot_xarm7_measured` (rig `tidybot_xarm7_20261111`) | Drawer opening, base-driven | `drawer/glass_counter__stack_b_3_front` from (7.76149, -1.73157, yaw -1.04°) | xemb's kino planner on the identified command path (`--measured_command_path`, your 2026-10-27 handoff recipe with `base_pull`) |
+| `tidybot_xarm7_measured` (rig `tidybot_xarm7_20261111`) | Drawer opening, base-driven | `drawer/glass_counter__stack_b_3_front` from (7.76149, -1.73157, yaw -1.04°) | xemb's kino planner on the identified command path (`--measured_command_path`, your 2026-10-27 handoff recipe with `base_pull`): `scripts/collect_drawer_open.sh` |
 
 Why these choices:
 - **The DROID cannot reach any upper cabinet from the island station** (3.7-4.4 m away; `scripts/shelf_reach.py`). The
@@ -107,9 +112,48 @@ Object split (`scripts/collect_shelf_pnp.py`):
 | `heldout_hard` | metal spoon | Thin and flat on the shelf: should trigger asking |
 
 Not used: the wooden spoon (the same failure category as the held-out spoon) and the plate (wider than the shelf).
-The drawer task's hard evaluation drawer is not built yet: xemb's per-part friction hooks run only on the command
-path (`randomization.py`); the plan is a high-friction and a locked (`.../slide` range clamped) variant of the demo
-drawer.
+
+### Drawer variants
+
+`$PY scripts/make_drawer_variants.py hard locked` builds `$MLSPACES_ARTIFACT_ROOT/src_kitchen_twin_drawer_<name>/`: the
+installed twin linked entry by entry, an edited `scene.xml`, and `variant.json` (the settings, the nominal values and a
+push test: a force on the slide held for 1 s).
+
+| Variant | Change to `drawer/glass_counter__stack_b_3_front` | Push test | Opens |
+|---|---|---|---|
+| nominal | none (slide frictionloss U(1, 2) N, see below) | 20 N moves it 2 cm, 30 N opens it | 20/20 |
+| `hard` | slide frictionloss 6.5 N | 20 N moves it 1 cm, 30 N opens it | 15/20 |
+| `locked` | a tendon limit stops the slide at 8 mm (a latch) | holds 200 N at 9.8 mm | 0/10 |
+
+**xemb overwrites the scene file's drawer physics.** Its arena `Drawer` (`molmo_spaces/env/arena/drawer.py`) draws,
+every episode, the slide's frictionloss U(1, 2) N, damping U(0.01, 0.1), armature U(0, 0.1) and every geom's friction
+U(0.1, 0.3). Neither the twin's identified values (frictionloss 0.4 N, damping 4) nor a variant's reach the simulation;
+the nominal collection ran on xemb's draw. `scripts/run_pipeline_hooked.py` runs `run_pipeline.py` with
+`helpsim/xemb_hooks.py`, which applies `variant.json`'s values after that draw (xemb is not edited). Tendons are not
+touched, so the latch works either way. Before the hook, frictionloss up to 400 N in the scene file still opened.
+
+The hard drawer's 6.5 N comes from a sweep with the hook (seed 3): 5 N opened 7/8, 6.5 N 3/6, 8 N 0/8. The TidyBot's
+base servos (kp 641340, no force limit) pull far harder than 6.5 N; what fails is the kino planner, which rehearses the
+pull in simulation and abandons the episode ("planner found no trajectory") when its rehearsal does not open the
+drawer. The episode is still saved, about 150 steps of approach and return. So almost every failure is a planner
+refusal, decided with the simulator's privileged state, and few are executed failures (the handle slipping from the
+jaws while the base keeps backing away): hard 4 refusals and 1 executed failure, locked 10 refusals. Outcomes on the
+hard drawer depend on the planner's random stream: the same seeds opened 6/20 in a first round, before the camera
+hook shifted that stream, and 15/20 in the collection below.
+
+### TidyBot cameras
+
+**The TidyBot's camera output is the hub session**, written by xemb's `molmo_spaces.robots.measured.session_export`
+(`scripts/export_drawer_sessions.sh`). It replays each episode's measured streams in the twin and renders the mast
+RealSense (`realsense`) and the wrist Arducam (`arducam`) through their calibrated lenses at 1280x720, with the camera
+pose, lens, exposure, white balance and stream timing drawn per episode around the calibration. Hub sessions are what
+remact's LeRobot converter reads. Successes and failures are exported alike; the manifest's outcome is the episode's.
+
+The videos `run_pipeline.py` writes during collection are previews. Stock, it gives the mobile arm the UR5e's camera
+system: `exo_camera_1` at a fixed offset from the arm root, which on the TidyBot looks across the kitchen and sees
+neither robot nor drawer, and the wrist camera at the UR5e's 56.74°. The hook renders `exo_camera_1` from the robot's
+`mast_camera` and the wrist camera at its MJCF field of view instead. `tidybot_open_20261113` (below) was collected
+before the hook, so its videos are the UR5e stand-ins; its trajectories still export to sessions.
 
 ### Collected data
 
@@ -130,14 +174,25 @@ Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Driv
 | heldout_in_distribution | orange | 21/25 | 2 |
 | heldout_hard | metal spoon | 0/25 | 0 |
 
-TidyBot drawer opening, `tidybot_open_20261113`: **20/20** opened (on Drive as
-`stanford/classes/cs238/data/drawer_open_tidybot_20261113`). All successes on the nominal drawer, so failure data for
-this task has to come from the hard evaluation drawer (high friction, locked), not yet built.
+TidyBot drawer opening (`$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/<run>`, sessions in
+`$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; on Drive under the run's name):
+
+| Run | Drawer | Command | Opened | Failures |
+|---|---|---|---|---|
+| `tidybot_open_nominal_20261113b` | nominal | `scripts/collect_drawer_open.sh tidybot_open_nominal_20261113b 20 3` | 20/20 | |
+| `tidybot_open_hard_a_20261113b` | `hard` | `scripts/collect_drawer_open.sh tidybot_open_hard_a_20261113b 10 100 hard` | 10/10 | |
+| `tidybot_open_hard_b_20261113b` | `hard` | `scripts/collect_drawer_open.sh tidybot_open_hard_b_20261113b 10 200 hard` | 5/10 | 4 refused, 1 executed |
+| `tidybot_open_locked_20261113b` | `locked` | `scripts/collect_drawer_open.sh tidybot_open_locked_20261113b 10 300 locked` | 0/10 | 10 refused |
+| `tidybot_open_20261113` | nominal | the recipe above, `--samples_per_house 20 --seed 3`, before the hooks | 20/20 | |
+
+Each run's sessions: `scripts/export_drawer_sessions.sh <run> [variant]`. `tidybot_open_20261113` is on Drive as
+`drawer_open_tidybot_20261113` with its UR5e stand-in videos.
 
 | Run | Command | Layout |
 |---|---|---|
 | `data/shelf_pnp/20261113` | `$PY scripts/collect_shelf_pnp.py --out data/shelf_pnp/20261113 --episodes 25` | `<split>/<object>/ep_<seed>.npz` (per 15 Hz tick: arm joints and targets, gripper, TCP pose, object pose, phase, attempt; `frame_tick`), `ep_<seed>_{cam_cabinet,wrist_camera}.mp4` (5 Hz), `episodes.jsonl` (outcome of every attempt) |
-| `$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/tidybot_open_20261113` | the TidyBot recipe above, `--samples_per_house 20 --seed 3 --no_filter` | xemb's H5: `house_0/trajectories_batch_*.h5`, one `traj_i` per episode (obs, actions, per-step success) |
+| `$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/tidybot_open_*` | `scripts/collect_drawer_open.sh` | xemb's H5: `house_0/trajectories_batch_*.h5`, one `traj_i` per episode (obs, actions, per-step success, the measured streams), and preview mp4s |
+| `$MLSPACES_ARTIFACT_ROOT/sessions/tidybot_open_*` | `scripts/export_drawer_sessions.sh` | one hub session per episode, `<time>-open-<run>.<batch>-traj_<i>/` (`manifest.json` with the outcome, `frames.jsonl`, `controls.jsonl`, `arm_report.jsonl`, `<frame>-{realsense,arducam}.jpg`), and `export_<batch>.{jsonl,log}` |
 
 `cam_cabinet` is a synthetic third-person view of the shelf. The record's ZED 2i is calibrated for the island
 station, and from the cart it sees the counter.
