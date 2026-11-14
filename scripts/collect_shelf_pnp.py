@@ -6,6 +6,9 @@ start and target, success, final outcome, every attempt's outcome, failure phase
 records the split, objects, code versions and station.
 
     source env.sh && $PY scripts/collect_shelf_pnp.py --out data/shelf_pnp/20261113 --episodes 30
+
+``--mode`` runs the expert with one of ``MODES``, the common failure causes (``shelf_pnp.FAULTS``), on every episode;
+``run.json`` and every ``episodes.jsonl`` line record the mode and its faults.
 """
 
 from __future__ import annotations
@@ -22,16 +25,22 @@ SPLITS = {
     "heldout_in_distribution": ["orange"],
     "heldout_hard": ["metal_spoon"],
 }
+MODES = {
+    "nominal": {},
+    "pose_error": {"pose_noise_m": 0.015},     # missed, edge and knocked grasps
+    "place_error": {"place_noise_m": 0.04},    # misplacements
+    "weak_grip": {"grip_scale": 0.05},         # missed grasps and slips under load
+}
 
 
 def collect_object(job: tuple) -> dict:
-    split, obj, seeds, out, render = job
+    split, obj, seeds, out, render, mode = job
     import imageio.v2 as imageio
     import numpy as np
 
     from helpsim.tasks.shelf_pnp import ShelfPnP
 
-    env = ShelfPnP(obj, render=render)
+    env = ShelfPnP(obj, render=render, **MODES[mode])
     odir = Path(out) / split / obj
     odir.mkdir(parents=True, exist_ok=True)
     n_ok = 0
@@ -47,7 +56,8 @@ def collect_object(job: tuple) -> dict:
             env.rec.frames.clear()
             env.rec.frame_tick.clear()
             n_ok += res["success"]
-            log.write(json.dumps({"seed": seed, "object": obj, "split": split, "start_obj_pos": start,
+            log.write(json.dumps({"seed": seed, "object": obj, "split": split, "mode": mode, "faults": env.faults,
+                                  "start_obj_pos": start,
                                   "target": env.target.tolist(), "n_ticks": len(env.rec.rows["t"]), **res}) + "\n")
             log.flush()
     return {"split": split, "object": obj, "episodes": len(seeds), "successes": n_ok}
@@ -70,17 +80,21 @@ def main() -> None:
     p.add_argument("--splits", nargs="+", default=list(SPLITS), choices=list(SPLITS))
     p.add_argument("--workers", type=int, default=min(6, os.cpu_count() or 1))
     p.add_argument("--no-render", action="store_true")
+    p.add_argument("--mode", default="nominal", choices=list(MODES))
+    p.add_argument("--objects", nargs="+", default=None, help="only these objects of the chosen splits")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     jobs, k = [], 0
     for split in a.splits:
         for obj in SPLITS[split]:
-            jobs.append((split, obj, list(range(a.seed0 + 1000 * k, a.seed0 + 1000 * k + a.episodes)), str(a.out),
-                         not a.no_render))
+            if a.objects is None or obj in a.objects:
+                jobs.append((split, obj, list(range(a.seed0 + 1000 * k, a.seed0 + 1000 * k + a.episodes)), str(a.out),
+                             not a.no_render, a.mode))
             k += 1
     (a.out / "run.json").write_text(json.dumps({
         "task": "shelf_pnp", "station": "droid_corner_20261029", "shelf": "upper_return_0_1 upper (z 1.5065)",
-        "splits": {s: SPLITS[s] for s in a.splits}, "episodes_per_object": a.episodes, "seed0": a.seed0,
+        "splits": {s: SPLITS[s] for s in a.splits}, "objects": [j[1] for j in jobs], "mode": a.mode,
+        "faults": MODES[a.mode], "episodes_per_object": a.episodes, "seed0": a.seed0,
         "help_commit": git_sha(str(Path(__file__).resolve().parents[1])), "xemb_commit": git_sha(os.environ["XEMB"]),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }, indent=1))

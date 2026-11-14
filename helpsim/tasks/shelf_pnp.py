@@ -9,6 +9,11 @@ is logged with its outcome, so post-failure states are real data for the value f
 Outcomes per attempt: ``success``, ``unreachable`` (IK off by > 1 cm or 10 deg on a waypoint), ``grasp_miss`` (the
 pads do not both touch the object after closing), ``slip`` (held at closing, lost while carried), ``place_miss``
 (released > 5 cm from the target), ``off_shelf`` (the object left the shelf; terminal).
+
+Faults (``FAULTS``) degrade the expert in the ways a real pick and place commonly fails, to collect bad trajectories
+whose cause is known: an error in the object's estimated position (missed or knocked grasps), an error in where it
+believes the target is (misplacements), a slippery object, and a weak grip (slips under load). They are fixed per
+``ShelfPnP`` and hidden from the recorded state.
 """
 
 from __future__ import annotations
@@ -35,6 +40,13 @@ STEP_M = 0.012          # Cartesian step per control tick (~18 cm/s)
 STEP_RAD = 0.05         # rotation step per control tick (~0.75 rad/s)
 CLOSE_S, OPEN_S, SETTLE_S = 1.0, 0.6, 0.8
 PLACE_TOL_M = 0.05
+FAULTS = {
+    "pose_noise_m": 0.0,      # sigma of the expert's object-position estimate (x, y; half in z), redrawn each attempt
+    "place_noise_m": 0.0,     # sigma of its target-position estimate (x, y), redrawn each attempt
+    "grip_friction": None,    # sliding friction between the pads and the object (a slippery object), the shelf's unchanged;
+                              # unused: at 0.08 the kitchen's light objects still hold, and slips come from a weak grip
+    "grip_scale": 1.0,        # the gripper actuator's force limit, scaled
+}
 
 
 def objects_dir() -> Path:
@@ -55,7 +67,11 @@ class ShelfPnP:
     PHASES = ("settle", "approach", "grasp", "close", "lift", "carry", "lower", "release", "retreat")
 
     def __init__(self, obj: str, station: str = "droid_corner_20261029", render: bool = True,
-                 size: tuple[int, int] = (180, 320), render_every: int = 3):
+                 size: tuple[int, int] = (180, 320), render_every: int = 3, **faults):
+        unknown = set(faults) - set(FAULTS)
+        if unknown:
+            raise ValueError(f"unknown faults {sorted(unknown)}; known: {sorted(FAULTS)}")
+        self.faults = {**FAULTS, **faults}
         spec = build_spec(station)
         odir = objects_dir()
         ospec = mujoco.MjSpec.from_file(str(odir / f"{obj}.xml"))
@@ -91,6 +107,13 @@ class ShelfPnP:
         root = self.data.body(f"{PREFIX}fr3_link0").xpos
         self.into = R[:, depth] * np.sign(R[:, depth] @ (self.data.geom_xpos[g] - root))
         self.substeps = max(1, round(1.0 / CONTROL_HZ / m.opt.timestep))
+        if self.faults["grip_friction"] is not None:
+            # On the pads, with contact priority over the object (MuJoCo otherwise takes the larger friction of a pair):
+            # the object's contact with the shelf keeps its own friction, so it does not slide away when touched.
+            for g in np.flatnonzero(np.isin(m.geom_bodyid, list(self.pads))):
+                m.geom_friction[g, 0] = self.faults["grip_friction"]
+                m.geom_priority[g] = 2
+        m.actuator_forcerange[self.grip_act] *= self.faults["grip_scale"]
         self.renderer = mujoco.Renderer(m, *size) if render else None
         self.render_every = render_every  # frames at CONTROL_HZ / render_every; frame_tick maps frames to ticks
         self.cams = [c for c in ("cam_cabinet", f"{PREFIX}gripper/wrist_camera")
@@ -240,6 +263,8 @@ class ShelfPnP:
 
     def _attempt(self, rng, perturb: bool) -> str:
         com = self.obj_com()
+        if self.faults["pose_noise_m"]:      # drawn only under the fault, so nominal episodes keep their random stream
+            com = com + rng.normal(0, self.faults["pose_noise_m"] * np.array([1.0, 1.0, 0.5]))
         offset = rng.normal(0, [0.008, 0.008, 0.006]) if perturb else np.zeros(3)
         grasp = np.array([com[0], com[1], max(com[2], self.shelf_top + 0.026)]) + offset
         grasp[2] = max(grasp[2], self.shelf_top + 0.018)
@@ -262,6 +287,8 @@ class ShelfPnP:
             return "off_shelf" if not self.on_shelf() else "grasp_miss"
         lift = grasp + [0, 0, 0.04]
         place = np.array([self.target[0], self.target[1], grasp[2]])
+        if self.faults["place_noise_m"]:
+            place[:2] += rng.normal(0, self.faults["place_noise_m"], 2)
         ok = self._move(lift, rot, "lift") and self._move(lift - 0.06 * into, rot, "carry") and \
             self._move(place + [0, 0, 0.04] - 0.06 * into, rot, "carry") and \
             self._move(place + [0, 0, 0.04], rot, "carry")

@@ -141,6 +141,38 @@ jaws while the base keeps backing away): hard 4 refusals and 1 executed failure,
 hard drawer depend on the planner's random stream: the same seeds opened 6/20 in a first round, before the camera
 hook shifted that stream, and 15/20 in the collection below.
 
+### Bad trajectories: common failure modes
+
+For the value function, both tasks are also collected with faults that cause the failures a real robot commonly has.
+Each fault is set for a whole run, so every episode's cause is known; the fault is not in the recorded state.
+
+Shelf (`scripts/collect_shelf_pnp.py --mode`, `helpsim/tasks/shelf_pnp.py` `FAULTS`). Calibration on the four easy
+objects, 8 episodes each (nominal: 80/100 on the 20261113 seeds):
+
+| Mode | Fault | Success | Failures it adds |
+|---|---|---|---|
+| `pose_error` | object-position estimate off by N(0, 1.5 cm) in x, y (0.75 cm in z), redrawn each attempt | 19/32 | missed and edge grasps, slips, knocked objects |
+| `place_error` | target estimate off by N(0, 4 cm) in x, y, redrawn each attempt | 13/32 | misplacements |
+| `weak_grip` | gripper force limit × 0.05 | 14/32 | missed grasps, slips under load |
+
+A slippery object (pad friction 0.08 with contact priority) still held the light kitchen objects (21/32, few slips),
+so it is not a mode. A first version put the low friction on the object, which also made it slide along the shelf
+and turned its failures into unreachable grasps.
+
+Drawer (`$HELP_FAULT`, `helpsim/xemb_hooks.py`):
+
+| Fault | `$HELP_FAULT` | Smoke | What happens |
+|---|---|---|---|
+| hidden stuck drawer | `{"hidden_drawer": true}` with variant `stuck` (frictionloss 20 N) | 0/3 | the planner rehearses on a nominal drawer, commits, and the handle slides out of the jaws as the base backs away |
+| hidden locked drawer | `{"hidden_drawer": true}` with variant `locked` | 0/3 | the same against the latch |
+| weak grip | `{"grip_scale": 0.02}` | 1/3 | the handle slips during the pull (0.05 and 0.2 still open every time) |
+| pull stops early | `{"stop_fraction": 0.3}` | 0/2 | the base stops after 30% of the planned pull |
+
+Without `hidden_drawer`, the planner sees the variant and refuses to pull (the drawer variants above). With it, every
+smoke episode planned an opening and failed while executing it. xemb keeps the model across episodes, so the hook
+hides the drawer again (and restores the grip) when the policy resets for the next episode. `make_drawer_variants.py
+--custom stuck --frictionloss 20` builds the stuck drawer.
+
 ### TidyBot cameras
 
 **The TidyBot's camera output is the hub session**, written by xemb's `molmo_spaces.robots.measured.session_export`
@@ -175,7 +207,8 @@ Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Driv
 | heldout_hard | metal spoon | 0/25 | 0 |
 
 TidyBot drawer opening (`$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/<run>`, sessions in
-`$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; on Drive under the run's name):
+`$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; the four 20261113b runs on Drive as
+`stanford/classes/cs238/data/drawer_open_tidybot_20261113b/{trajectories,sessions}/<run>`):
 
 | Run | Drawer | Command | Opened | Failures |
 |---|---|---|---|---|

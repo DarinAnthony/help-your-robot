@@ -12,6 +12,11 @@ if [[ -n $VARIANT ]]; then
   [[ -f $SRC_KITCHEN_TWIN_DIR/variant.json ]] || { echo "no variant $VARIANT (scripts/make_drawer_variants.py)"; exit 1; }
 fi
 KG='"grasp_seat": "seated_v2", "grasp_close_mode": "until_settled", "gripper_close_duration": 1.5, "grasp_hold_min_gap": 0.0025, "mpc_time_cap": "replans_v1", "arm_velocity_limit_reference": "previous_command", "mpc_target_reference": "previous_target", "base_pull": {}'
+# $HELP_FAULT (helpsim/xemb_hooks.py): faults for bad trajectories, e.g. '{"hidden_drawer": true}' with a variant,
+# '{"grip_scale": 0.2}' or '{"stop_fraction": 0.3}'. The run's settings go to <run>/help_run.json.
+RUN_DIR="$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/$RUN"
+mkdir -p "$RUN_DIR"
+printf '{"run": "%s", "episodes": %s, "seed": %s, "variant": "%s", "fault": %s}\n' "$RUN" "$N" "$SEED" "$VARIANT" "${HELP_FAULT:-"{}"}" > "$RUN_DIR/help_run.json"
 cd "$XEMB"
 exec $PY ${PROBE:-} "$HOME/research/help!/scripts/run_pipeline_hooked.py" --task_type open --scene_dataset src_kitchen_twin --robot mobile_unified_arm \
   --variant_dir "$MLSPACES_ARTIFACT_ROOT/robots/tidybot_xarm7_measured" --planner kino --plan_mode mpc \
