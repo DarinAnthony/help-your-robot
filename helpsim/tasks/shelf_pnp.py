@@ -309,6 +309,61 @@ class ShelfPnP:
         err = float(np.linalg.norm(self.obj_com()[:2] - self.target[:2]))
         return "success" if err < PLACE_TOL_M else "place_miss"
 
+    # ---------------------------------------------------------------- counterfactual action tree
+    TREE_ACTIONS = {"A": False, "D": True}   # attempt: the nominal grasp again; adjust: the perturbed re-approach
+    TERMINAL = ("success", "off_shelf", "place_miss")
+
+    def snapshot(self) -> np.ndarray:
+        spec = mujoco.mjtState.mjSTATE_INTEGRATION    # physics, warm start and controls: a restore replays exactly
+        state = np.empty(mujoco.mj_stateSize(self.model, spec))
+        mujoco.mj_getState(self.model, self.data, state, spec)
+        return state
+
+    def restore(self, state: np.ndarray) -> None:
+        mujoco.mj_setState(self.model, self.data, state, mujoco.mjtState.mjSTATE_INTEGRATION)
+        mujoco.mj_forward(self.model, self.data)
+
+    def decision_state(self) -> dict:
+        p, q = self.obj_pose()
+        return {"t": float(self.data.time), "obj_pos": p.tolist(), "obj_quat": q.tolist(), "obj_com": self.obj_com().tolist(),
+                "arm_qpos": self.arm_q().tolist(), "tcp_pos": self.data.site_xpos[self.site].tolist(),
+                "gripper_pos": float(self.data.actuator_length[self.grip_act]), "on_shelf": bool(self.on_shelf())}
+
+    def decision_frames(self) -> dict:
+        out = {}
+        if self.renderer is not None:
+            for cam in self.cams:
+                self.renderer.update_scene(self.data, camera=cam)
+                out[cam.split("/")[-1]] = self.renderer.render()
+        return out
+
+    def run_tree(self, seed: int, max_attempts: int = 3) -> tuple[list[dict], dict]:
+        """Every attempt / adjust sequence of up to ``max_attempts`` attempts from the state ``reset`` left, each branch
+        from a snapshot of its parent's end state and with its own random stream (``[seed, depth, branch]``). Asking for
+        help is possible at every node, so any help policy over (attempt, adjust, ask) is scored exactly on the tree.
+
+        Returns the nodes, root first (``path`` is the action string that reached it, "" for the root, e.g. "AD": an
+        attempt then an adjust; ``outcome`` is the outcome of the attempt that ended at it), and each node's decision
+        frames by path."""
+        nodes, frames = [], {}
+
+        def visit(path: str, outcome: str | None, fail_phase: str | None) -> None:
+            nodes.append({"path": path, "depth": len(path), "outcome": outcome, "fail_phase": fail_phase,
+                          "state": self.decision_state(), "tick": len(self.rec.rows["t"])})
+            frames[path] = self.decision_frames()
+            if outcome in self.TERMINAL or len(path) >= max_attempts:
+                return
+            start = self.snapshot()
+            for i, (action, perturb) in enumerate(self.TREE_ACTIONS.items()):
+                self.restore(start)
+                self.attempt = len(path)
+                rng = np.random.default_rng([seed, len(path), int.from_bytes((path + action).encode(), "little")])
+                result = self._attempt(rng, perturb=perturb)
+                visit(path + action, result, self.fail_phase)
+
+        visit("", None, None)
+        return nodes, frames
+
     def arrays(self) -> dict:
         return {**{k: np.asarray(v) for k, v in self.rec.rows.items()}, "frame_tick": np.asarray(self.rec.frame_tick)}
 

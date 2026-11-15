@@ -1,7 +1,8 @@
 # help-your-robot
 
 When should a robot ask for help? A CS 238 project on the identified DROID station in the SRC kitchen twin.
-The research plan is [`PLAN.md`](PLAN.md); this file covers setup and what has been checked.
+The research plan is [`PLAN.md`](PLAN.md) and the experiment (hypotheses, evaluation protocol, baselines, data it needs) is
+[`EXPERIMENT_PLAN.md`](EXPERIMENT_PLAN.md); this file covers setup, what has been checked and the collected data.
 
 ## Layout
 
@@ -14,6 +15,8 @@ The research plan is [`PLAN.md`](PLAN.md); this file covers setup and what has b
 | `scripts/make_drawer_variants.py` | Hard and locked copies of the twin's demo drawer, with a push test of each |
 | `scripts/run_pipeline_hooked.py`, `helpsim/xemb_hooks.py` | xemb's `run_pipeline.py` with help!'s hooks: the variant's drawer values, the TidyBot's own cameras for the preview videos |
 | `scripts/export_drawer_sessions.sh` | Drawer episodes as hub sessions through the TidyBot's calibrated cameras (xemb's `session_export`) |
+| `scripts/collect_shelf_pnp.py`, `helpsim/tasks/shelf_pnp.py` | The DROID shelf pick and place: rendered episodes, fault modes, and counterfactual action trees (`--tree`) |
+| `scripts/drawer_attempts.py` | Per-pull attempt records of drawer runs from the H5 measured streams (`<run>/attempts.jsonl`) |
 | `scripts/contact_sheet.py` | Frames across time from episode videos as one PNG, for a quick look |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |
 | `data/` | Generated outputs (git-ignored) |
@@ -173,6 +176,37 @@ smoke episode planned an opening and failed while executing it. xemb keeps the m
 hides the drawer again (and restores the grip) when the policy resets for the next episode. `make_drawer_variants.py
 --custom stuck --frictionloss 20` builds the stuck drawer.
 
+### Sequential data: drawer re-pulls and shelf action trees
+
+The help policy decides at every attempt, so the data needs second and third attempts from the states real failures
+leave, and the evaluation needs to know what every choice would have led to (EXPERIMENT_PLAN.md §4).
+
+**Drawer re-pulls** (`HELP_REPULLS=2`, `helpsim/xemb_hooks.py`). xemb retries a pull only when its own rehearsal predicts
+a slip, so before this every drawer episode was one pull. With re-pulls, a pull that ends with the drawer not open is
+followed by a release and return: the jaws open with the arm held (1.2 s), the hand backs off 8 cm, the arm goes home,
+the base drives back to where the pull started, and the policy's retry re-plans grasp and pull, up to 2 more times.
+`collect_drawer_open.sh` then raises the episode's step limit to 750 (a failed pull plus its return is ~220 steps). A
+hidden drawer is hidden again for every re-plan. `"stop_pulls": 1` with `stop_fraction` makes the early stop a one-off
+that a re-pull recovers from. Two things the smoke runs caught on the way:
+
+- After a failed pull the base had backed ~0.3 m away, so the re-grasp found no feasible grasp; hence the base's return.
+- xemb's own slip release opens the jaws for 0.25 s, shorter than the identified jaws take, and its retreat then
+  re-commands them closed: the arm going home dragged a stopped drawer open to 25 cm and the task scored it a success.
+  The release now keeps the gripper commanded open on every step.
+
+Smoke (`smk6_*`, deleted): a locked drawer, three pulls each stopping at 8.5 mm with the base returning in between; a
+one-off early stop, pull 1 at 6.3 cm, re-pull opened to 30 cm. `scripts/drawer_attempts.py <run>` splits each episode
+into pulls by `obs/extra/policy_num_retries` and records each pull's drawer travel (from the 250 Hz measured streams),
+base travel and outcome.
+
+**Shelf action trees** (`collect_shelf_pnp.py --tree`, `ShelfPnP.run_tree`). From each start state, every
+attempt / adjust sequence up to 3 attempts: at each decision point the full physics state is saved (`mj_getState`,
+`mjSTATE_INTEGRATION`, so a restore replays exactly) and both continuations are run, each with its own random stream;
+decision-point frames are rendered at every node. Up to 14 attempts per start, ~10 s each. The trees use the rendered
+episodes' seeds, so each tree shares its start with a video episode, and on nominal starts the tree's first attempt
+reproduces the episode's (it is deterministic). Checked: the same tree twice gives identical outcomes and object
+poses.
+
 ### TidyBot cameras
 
 **The TidyBot's camera output is the hub session**, written by xemb's `molmo_spaces.robots.measured.session_export`
@@ -205,6 +239,37 @@ Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Driv
 | train | tape | 0/25 | 0 |
 | heldout_in_distribution | orange | 21/25 | 2 |
 | heldout_hard | metal spoon | 0/25 | 0 |
+
+Shelf pick and place in four expert modes, `data/shelf_pnp/20261114/<mode>` (seed0 20000 in every mode, so episode
+*i* of an object starts from the same state and target in each; rendered; 1,265 episodes):
+
+| Object | nominal | pose_error | place_error | weak_grip |
+|---|---|---|---|---|
+| egg | 38/40 | 15/25 | 11/25 | 22/25 |
+| tomato | 35/40 | 12/25 | 12/25 | 1/25 |
+| wooden ball | 29/40 | 18/25 | 9/25 | 17/25 |
+| drumstick | 22/40 | 11/25 | 4/25 | 6/25 |
+| waffle | 13/40 | 12/25 | 8/25 | 10/25 |
+| duster | 12/40 | 9/25 | 6/25 | 4/25 |
+| sponge | 6/40 | 5/25 | 2/25 | 0/25 |
+| banana | 0/40 | 0/25 | 0/25 | 8/25 |
+| tape | 0/40 | 0/25 | 0/25 | 0/25 |
+| orange (held out, in distribution) | 32/40 | 15/25 | 14/25 | 20/25 |
+| metal spoon (held out, hard) | 0/40 | 1/25 | 0/25 | 0/25 |
+| final outcomes | 187 success, 142 unreachable, 80 grasp miss, 19 slip, 7 off shelf, 5 place miss | 98 / 92 / 63 / 16 / 3 / 3 | 66 / 93 / 47 / 14 / 17 / 38 | 88 / 83 / 80 / 12 / 5 / 7 |
+
+`$PY scripts/collect_shelf_pnp.py --out data/shelf_pnp/20261114/<mode> --mode <mode> --episodes <40 nominal, 25 otherwise> --seed0 20000 --workers 6`.
+
+TidyBot drawer, single pull with faults, 20261114 (seeds 500-1100; failure-mode runs of the section above):
+
+| Run | Drawer / fault | Opened | First-pull drawer travel |
+|---|---|---|---|
+| `tidybot_open_nominal_20261114` | nominal | 30/30 | 0.29-0.30 m |
+| `tidybot_open_hidden_hard_20261114` | `hard`, hidden | 7/20 | 0.034 m when it fails |
+| `tidybot_open_hidden_stuck_20261114` | `stuck`, hidden | 0/20 | 0.019-0.020 m |
+| `tidybot_open_hidden_locked_20261114` | `locked`, hidden | 0/20 | 0.008 m |
+
+The weak-grip and stop-early runs of that day were stopped part way and are superseded by the re-pull runs.
 
 TidyBot drawer opening (`$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/<run>`, sessions in
 `$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; the four 20261113b runs on Drive as

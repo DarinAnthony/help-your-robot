@@ -9,6 +9,12 @@ records the split, objects, code versions and station.
 
 ``--mode`` runs the expert with one of ``MODES``, the common failure causes (``shelf_pnp.FAULTS``), on every episode;
 ``run.json`` and every ``episodes.jsonl`` line record the mode and its faults.
+
+``--tree`` collects counterfactual action trees instead (``ShelfPnP.run_tree``, EXPERIMENT_PLAN.md §4): from the same
+start states as the episodes with the same ``--seed0``/``--mode``, every attempt / adjust sequence of up to 3 attempts.
+Per object: ``trees.jsonl`` (one line per start: seed, start, target, and every node's path, outcome, failure phase and
+decision-point state) and ``tree_<seed>.npz`` (each node's decision-point frames, keyed ``<path>/<camera>``, the root
+``root/<camera>``).
 """
 
 from __future__ import annotations
@@ -33,8 +39,35 @@ MODES = {
 }
 
 
+def collect_tree(job: tuple) -> dict:
+    split, obj, seeds, out, render, mode, _ = job
+    import numpy as np
+
+    from helpsim.tasks.shelf_pnp import ShelfPnP
+
+    env = ShelfPnP(obj, render=render, render_every=10 ** 9, **MODES[mode])   # frames only at decision points
+    odir = Path(out) / split / obj
+    odir.mkdir(parents=True, exist_ok=True)
+    n_ok = n_attempts = 0
+    with open(odir / "trees.jsonl", "a") as log:
+        for seed in seeds:
+            env.reset(np.random.default_rng(seed))
+            start = env.start_obj[0].tolist()
+            nodes, frames = env.run_tree(seed)
+            np.savez_compressed(odir / f"tree_{seed:05d}.npz", **{f"{path or 'root'}/{cam}": img
+                                                                 for path, cams in frames.items() for cam, img in cams.items()})
+            n_ok += any(n["outcome"] == "success" for n in nodes)
+            n_attempts += len(nodes) - 1
+            log.write(json.dumps({"seed": seed, "object": obj, "split": split, "mode": mode, "faults": env.faults,
+                                  "start_obj_pos": start, "target": env.target.tolist(), "nodes": nodes}) + "\n")
+            log.flush()
+    return {"split": split, "object": obj, "episodes": len(seeds), "successes": n_ok, "attempts": n_attempts}
+
+
 def collect_object(job: tuple) -> dict:
-    split, obj, seeds, out, render, mode = job
+    split, obj, seeds, out, render, mode, tree = job
+    if tree:
+        return collect_tree(job)
     import imageio.v2 as imageio
     import numpy as np
 
@@ -82,6 +115,7 @@ def main() -> None:
     p.add_argument("--no-render", action="store_true")
     p.add_argument("--mode", default="nominal", choices=list(MODES))
     p.add_argument("--objects", nargs="+", default=None, help="only these objects of the chosen splits")
+    p.add_argument("--tree", action="store_true", help="counterfactual action trees from the same starts")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     jobs, k = [], 0
@@ -89,10 +123,10 @@ def main() -> None:
         for obj in SPLITS[split]:
             if a.objects is None or obj in a.objects:
                 jobs.append((split, obj, list(range(a.seed0 + 1000 * k, a.seed0 + 1000 * k + a.episodes)), str(a.out),
-                             not a.no_render, a.mode))
+                             not a.no_render, a.mode, a.tree))
             k += 1
     (a.out / "run.json").write_text(json.dumps({
-        "task": "shelf_pnp", "station": "droid_corner_20261029", "shelf": "upper_return_0_1 upper (z 1.5065)",
+        "task": "shelf_pnp_tree" if a.tree else "shelf_pnp", "station": "droid_corner_20261029", "shelf": "upper_return_0_1 upper (z 1.5065)",
         "splits": {s: SPLITS[s] for s in a.splits}, "objects": [j[1] for j in jobs], "mode": a.mode,
         "faults": MODES[a.mode], "episodes_per_object": a.episodes, "seed0": a.seed0,
         "help_commit": git_sha(str(Path(__file__).resolve().parents[1])), "xemb_commit": git_sha(os.environ["XEMB"]),
@@ -101,7 +135,8 @@ def main() -> None:
     t = time.time()
     with mp.get_context("spawn").Pool(a.workers) as pool:
         for r in pool.imap_unordered(collect_object, jobs):
-            print(f"{r['split']:24s} {r['object']:12s} {r['successes']}/{r['episodes']}  ({time.time() - t:.0f}s)", flush=True)
+            extra = f"  {r['attempts']} attempts" if "attempts" in r else ""
+            print(f"{r['split']:24s} {r['object']:12s} {r['successes']}/{r['episodes']}{extra}  ({time.time() - t:.0f}s)", flush=True)
 
 
 if __name__ == "__main__":
