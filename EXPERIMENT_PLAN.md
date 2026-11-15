@@ -74,11 +74,11 @@ once the pull starts (`hidden_drawer`), and a failed pull is re-pulled up to twi
 |---|---|---|---|
 | nominal | xemb's slide friction U(1, 2) N | easy | train / cal / test |
 | transient stop | nominal; the first pull's base stops at 30% | recoverable | train / cal / test |
-| weak grip | nominal; gripper force × 0.02 from the pull | mixed | train / cal / test |
+| weak grip | nominal; gripper force × 0.02 from the pull | mixed (4/20 open; after a slip the planner's grasp check aborts, so no re-pull) | train / cal / test |
 | hard | slide friction 6.5 N (35% first-pull success, single pull) | recoverable / infeasible | train / cal / test |
 | stuck | slide friction 20 N (needs ~60 N) | infeasible | train / cal / test |
 | locked | latch at 8 mm, holds 200 N | infeasible | train / cal / test |
-| **medium (held out)** | slide friction 4.5 N | between nominal and hard | **test only** |
+| **medium (held out)** | slide friction 4.5 N | mostly easy, some recoverable (22/30 first pulls open; 30/30 within 3) | **test only** |
 
 Drawer travel separates the conditions after a single failed pull:
 - locked: 8 mm
@@ -179,11 +179,11 @@ the belief adds.
 | Data | Episodes / starts | Status | Used for |
 |---|---|---|---|
 | Shelf 20261113, nominal, seed0 1000 | 275 | done, on Drive | V training (extra starts) |
-| Shelf 20261114, 4 modes, seed0 20000, rendered | 440 + 275 + 275 + 275 | weak grip finishing | V training, images |
-| **Shelf action trees**, same 1,265 starts | ≤ 14 attempts each, decision frames | **to collect** (~3 h) | the exact evaluation; the observation model for attempt and adjust; difficulty labels |
+| Shelf 20261114, 4 modes, seed0 20000, rendered | 440 + 275 + 275 + 275 | done, on Drive | V training, images |
+| **Shelf action trees**, same 1,265 starts | 12,892 attempts; easy 374, recoverable 252, infeasible 639 | done, on Drive (`shelf_pnp_droid_20261114_tree`) | the exact evaluation; the observation model for attempt and adjust; difficulty labels |
 | Drawer 20261113b, single pull, planner-aware | 50 | done, on Drive | first-pull V only |
-| Drawer 20261114, single pull, hidden faults | nominal 30, hard 20, stuck 20, locked 20 | done | first-pull V and observation model |
-| **Drawer re-pull runs** (`HELP_REPULLS=2`, `tidybot_open_rp_*_20261115`, seeds 2000–2615) | nominal 20, transient stop 20, weak grip 20, hard 40, stuck 25, locked 25, medium 30 | **to collect** (~12 h) | sequential drawer decisions; the drawer evaluation |
+| Drawer 20261114, single pull, hidden faults | nominal 30, hard 20, stuck 20, locked 20 | done, on Drive | first-pull V and observation model |
+| **Drawer re-pull runs** (`HELP_REPULLS=2`, `tidybot_open_rp_*_20261115`, seeds 2000–2615) | nominal 20/20, transient stop 20/20, weak grip 4/20, hard 32/40, stuck 0/25, locked 0/25, medium 30/30 opened | done, on Drive (trajectories; sessions exporting) | sequential drawer decisions; the drawer evaluation |
 
 More drawer data **is** necessary: until now no drawer episode contained a second attempt. Without that, the drawer can
 only test a one-shot decision, so neither the belief update nor H2 can be tested on it. The re-pull runs give real
@@ -209,6 +209,11 @@ for the same starts.
   help-seeking on top of a fixed skill.
 - **Drawer re-pulls.** The planner re-plans on the believed drawer each time. While the hand approaches for a re-pull,
   the drawer has nominal physics, until the pull starts.
+- **Weak grip ends itself.** After a slip the planner's own grasp check rejects every grasp, so weak-grip episodes
+  stop after one pull instead of offering a re-pull. On the drawer, weak grip is effectively a one-shot condition
+  where the planner detects the fault; the sequential test rests on transient stop, hard, stuck and locked.
+- **The held-out drawer is easy-leaning.** `medium` opened in 30/30 (8 needed a re-pull), so it tests over-asking on
+  mostly easy drawers more than recovery from hard ones.
 - **Outcome-defined difficulty.** The labels depend on the attempt budget (3). Reporting at budgets of 2 and 3 shows
   that the conclusions do not hinge on it.
 - **The kitchen's object set has no cups.** Generalization is tested across shelf objects and drawer frictions, not

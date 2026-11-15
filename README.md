@@ -17,6 +17,7 @@ The research plan is [`PLAN.md`](PLAN.md) and the experiment (hypotheses, evalua
 | `scripts/export_drawer_sessions.sh` | Drawer episodes as hub sessions through the TidyBot's calibrated cameras (xemb's `session_export`) |
 | `scripts/collect_shelf_pnp.py`, `helpsim/tasks/shelf_pnp.py` | The DROID shelf pick and place: rendered episodes, fault modes, and counterfactual action trees (`--tree`) |
 | `scripts/drawer_attempts.py` | Per-pull attempt records of drawer runs from the H5 measured streams (`<run>/attempts.jsonl`) |
+| `scripts/tree_summary.py` | Outcome-defined difficulty of every shelf tree start (`<tree root>/difficulty.jsonl`) |
 | `scripts/contact_sheet.py` | Frames across time from episode videos as one PNG, for a quick look |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |
 | `data/` | Generated outputs (git-ignored) |
@@ -203,9 +204,10 @@ base travel and outcome.
 attempt / adjust sequence up to 3 attempts: at each decision point the full physics state is saved (`mj_getState`,
 `mjSTATE_INTEGRATION`, so a restore replays exactly) and both continuations are run, each with its own random stream;
 decision-point frames are rendered at every node. Up to 14 attempts per start, ~10 s each. The trees use the rendered
-episodes' seeds, so each tree shares its start with a video episode, and on nominal starts the tree's first attempt
-reproduces the episode's (it is deterministic). Checked: the same tree twice gives identical outcomes and object
-poses.
+episodes' seeds, so each tree shares its start with a video episode. Without injected noise (nominal, weak grip) the
+tree's first attempt reproduces the episode's in 702/715 starts; with pose or place noise the branches draw their own
+noise, so the first attempt matches the episode only in 372/550. Checked: the same tree twice gives identical outcomes
+and object poses.
 
 ### TidyBot cameras
 
@@ -270,6 +272,48 @@ TidyBot drawer, single pull with faults, 20261114 (seeds 500-1100; failure-mode 
 | `tidybot_open_hidden_locked_20261114` | `locked`, hidden | 0/20 | 0.008 m |
 
 The weak-grip and stop-early runs of that day were stopped part way and are superseded by the re-pull runs.
+
+Shelf action trees, `data/shelf_pnp/20261114_tree/<mode>` (the 1,265 starts above, 12,892 attempts; on Drive as
+`shelf_pnp_droid_20261114_tree`). Each start's hidden difficulty from its tree (`scripts/tree_summary.py`): easy, the
+first attempt succeeds; recoverable, a later attempt within 3 does; infeasible, none does:
+
+| Mode | easy | recoverable | infeasible |
+|---|---|---|---|
+| nominal | 165 | 84 | 191 |
+| pose_error | 79 | 65 | 131 |
+| place_error | 53 | 63 | 159 |
+| weak_grip | 77 | 40 | 158 |
+
+Recoverable starts split between the actions: the shortest successful path starts with an adjust in 178 of 252 (`D`
+alone 56, `DA` 78), so attempt and adjust are not interchangeable. Per object, the nominal mix runs from all easy or
+recoverable (wooden ball 24/16/0, egg 33/6/1) to all infeasible (tape 0/0/40, metal spoon 0/2/38).
+
+TidyBot drawer with re-pulls, 20261115 (`HELP_REPULLS=2`, step limit 750, seeds 2000-2615; trajectories on Drive as
+`drawer_open_tidybot_20261115/trajectories/<run>`). Pull sequences from `scripts/drawer_attempts.py`; `stuck` here
+means the drawer travelled under 5 cm:
+
+| Run | Drawer / fault | Opened | Pull sequences |
+|---|---|---|---|
+| `tidybot_open_rp_nominal_20261115` | nominal | 20/20 | success 20 |
+| `tidybot_open_rp_transient_stop_20261115` | stop at 30 %, first pull only | 20/20 | short-success 20 (first pull 6.1-6.3 cm) |
+| `tidybot_open_rp_hidden_medium_{a,b}_20261115` | `medium` (held out), hidden | 30/30 | success 22, stuck-success 6, stuck-stuck-success 2 |
+| `tidybot_open_rp_hidden_hard_{a,b}_20261115` | `hard`, hidden | 32/40 | success 24, stuck-success 4, stuck-stuck-success 4, 3x stuck 8 |
+| `tidybot_open_rp_hidden_stuck_20261115` | `stuck`, hidden | 0/25 | 3x stuck 25 (each under 2.1 cm) |
+| `tidybot_open_rp_hidden_locked_20261115` | `locked`, hidden | 0/25 | 3x stuck 25 (8.5 mm each) |
+| `tidybot_open_rp_weak_grip_20261115` | grip force x0.02 | 4/20 | success 4, stuck then abort 16 |
+
+- Weak grip: after the first pull slips, the re-plan's grasp check simulates holding the handle with the weakened
+  grip, finds no grasp that holds, and xemb ends the episode ("no reachable +holding grasp — fail fast"). The
+  planner detects the fault itself, so these episodes have one pull and no second.
+- Stuck: the gripper keeps the handle and the drawer resists, so the base sometimes stalls instead of backing off
+  (base travel 0 for every second pull, 0-0.3 m for the others). Locked drawers let go of the hand, and the base
+  backs off the full 0.29 m every time.
+- `medium` (frictionloss 4.5) turned out closer to nominal than to hard: 22 of 30 first pulls open it. It remains the
+  held-out drawer for EXPERIMENT_PLAN.md.
+
+Sessions for the re-pull runs and the three hidden 20261114 runs are exported with `scripts/export_drawer_sessions.sh`
+(about an hour per episode per process at 1280x720) to `$MLSPACES_ARTIFACT_ROOT/sessions/<run>`. The trajectories'
+preview mp4s (mast and wrist) are there meanwhile.
 
 TidyBot drawer opening (`$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/<run>`, sessions in
 `$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; the four 20261113b runs on Drive as
