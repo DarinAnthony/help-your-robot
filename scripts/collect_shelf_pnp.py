@@ -10,6 +10,10 @@ records the split, objects, code versions and station.
 ``--mode`` runs the expert with one of ``MODES``, the common failure causes (``shelf_pnp.FAULTS``), on every episode;
 ``run.json`` and every ``episodes.jsonl`` line record the mode and its faults.
 
+``--render-every 1`` renders a frame on every 15 Hz tick (pi0.5 training data; TASK_SPEC.md §2). ``--rerender-from
+<old out>`` re-runs only the seeds that succeeded there (same mode and objects; episodes are deterministic in their
+seed) and records whether each re-run reproduced the outcome (``reproduced`` in ``episodes.jsonl``).
+
 ``--tree`` collects counterfactual action trees instead (``ShelfPnP.run_tree``, EXPERIMENT_PLAN.md §4): from the same
 start states as the episodes with the same ``--seed0``/``--mode``, every attempt / adjust sequence of up to 3 attempts.
 Per object: ``trees.jsonl`` (one line per start: seed, start, target, and every node's path, outcome, failure phase and
@@ -65,20 +69,35 @@ def collect_tree(job: tuple) -> dict:
 
 
 def collect_object(job: tuple) -> dict:
-    split, obj, seeds, out, render, mode, tree = job
+    split, obj, seeds, out, render, mode, tree, render_every, old = job
     if tree:
-        return collect_tree(job)
+        return collect_tree(job[:7])
     import imageio.v2 as imageio
     import numpy as np
 
     from helpsim.tasks.shelf_pnp import ShelfPnP
 
-    env = ShelfPnP(obj, render=render, **MODES[mode])
+    env = ShelfPnP(obj, render=render, render_every=render_every, **MODES[mode])
     odir = Path(out) / split / obj
+    expected = {}
+    if old is not None:
+        old_log = Path(old) / split / obj / "episodes.jsonl"
+        if not old_log.is_file():
+            return {"split": split, "object": obj, "episodes": 0, "successes": 0}
+        for line in old_log.read_text().splitlines():
+            r = json.loads(line)
+            if r["success"]:
+                expected[r["seed"]] = r["final_outcome"]
+        seeds = sorted(expected)[:len(seeds)]   # --episodes caps the re-run
     odir.mkdir(parents=True, exist_ok=True)
     n_ok = 0
+    done = set()
+    if (odir / "episodes.jsonl").is_file():   # a restarted run skips the seeds it already finished
+        done = {json.loads(line)["seed"] for line in (odir / "episodes.jsonl").read_text().splitlines() if line}
     with open(odir / "episodes.jsonl", "a") as log:
         for seed in seeds:
+            if seed in done:
+                continue
             rng = np.random.default_rng(seed)
             env.reset(rng)
             start = env.start_obj[0].tolist()
@@ -89,7 +108,9 @@ def collect_object(job: tuple) -> dict:
             env.rec.frames.clear()
             env.rec.frame_tick.clear()
             n_ok += res["success"]
+            extra = {} if old is None else {"rerender_of": str(old), "reproduced": res["final_outcome"] == expected[seed]}
             log.write(json.dumps({"seed": seed, "object": obj, "split": split, "mode": mode, "faults": env.faults,
+                                  "render_every": render_every, **extra,
                                   "start_obj_pos": start,
                                   "target": env.target.tolist(), "n_ticks": len(env.rec.rows["t"]), **res}) + "\n")
             log.flush()
@@ -116,6 +137,9 @@ def main() -> None:
     p.add_argument("--mode", default="nominal", choices=list(MODES))
     p.add_argument("--objects", nargs="+", default=None, help="only these objects of the chosen splits")
     p.add_argument("--tree", action="store_true", help="counterfactual action trees from the same starts")
+    p.add_argument("--render-every", type=int, default=3, help="a frame every N ticks (15 Hz / N); 1 for pi0.5 data")
+    p.add_argument("--rerender-from", type=Path, default=None,
+                   help="re-run only the seeds that succeeded in this earlier output (same --mode)")
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     jobs, k = [], 0
@@ -123,12 +147,14 @@ def main() -> None:
         for obj in SPLITS[split]:
             if a.objects is None or obj in a.objects:
                 jobs.append((split, obj, list(range(a.seed0 + 1000 * k, a.seed0 + 1000 * k + a.episodes)), str(a.out),
-                             not a.no_render, a.mode, a.tree))
+                             not a.no_render, a.mode, a.tree, a.render_every,
+                             None if a.rerender_from is None else str(a.rerender_from / a.mode if (a.rerender_from / a.mode).is_dir() else a.rerender_from)))
             k += 1
     (a.out / "run.json").write_text(json.dumps({
         "task": "shelf_pnp_tree" if a.tree else "shelf_pnp", "station": "droid_corner_20261029", "shelf": "upper_return_0_1 upper (z 1.5065)",
         "splits": {s: SPLITS[s] for s in a.splits}, "objects": [j[1] for j in jobs], "mode": a.mode,
-        "faults": MODES[a.mode], "episodes_per_object": a.episodes, "seed0": a.seed0,
+        "faults": MODES[a.mode], "episodes_per_object": a.episodes, "seed0": a.seed0, "render_every": a.render_every,
+        "rerender_from": None if a.rerender_from is None else str(a.rerender_from),
         "help_commit": git_sha(str(Path(__file__).resolve().parents[1])), "xemb_commit": git_sha(os.environ["XEMB"]),
         "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }, indent=1))
