@@ -226,7 +226,7 @@ before the hook, so its videos are the UR5e stand-ins; its trajectories still ex
 ### Collected data
 
 Shelf pick and place, `data/shelf_pnp/20261113` (25 episodes per object; on Drive as
-`stanford/classes/cs238/data/shelf_pnp_droid_20261113`):
+`stanford/classes/cs238/help-your-robot/data/shelf_pnp_droid_20261113`):
 
 | Split | Object | Success | Succeeded on a retry |
 |---|---|---|---|
@@ -317,7 +317,7 @@ preview mp4s (mast and wrist) are there meanwhile.
 
 TidyBot drawer opening (`$MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1/<run>`, sessions in
 `$MLSPACES_ARTIFACT_ROOT/sessions/<run>`; the four 20261113b runs on Drive as
-`stanford/classes/cs238/data/drawer_open_tidybot_20261113b/{trajectories,sessions}/<run>`):
+`stanford/classes/cs238/help-your-robot/data/drawer_open_tidybot_20261113b/{trajectories,sessions}/<run>`):
 
 | Run | Drawer | Command | Opened | Failures |
 |---|---|---|---|---|
@@ -356,8 +356,12 @@ full Drive access (`scope=drive`); `drive.file` would only see folders rclone it
 ~/micromamba/envs/tools/bin/rclone config update gdrive scope drive && ~/micromamba/envs/tools/bin/rclone config reconnect gdrive:
 ```
 
-Then push any run directory. It is copied under `gdrive:stanford/classes/cs238/data/<run name>`, verified by size and
-MD5, and nothing on Drive is deleted. `HELP_DRIVE_ROOT` and `HELP_DRIVE_REMOTE` override the destination; the script
+Everything for this project lives in its own folder on the Stanford Google Drive,
+`stanford/classes/cs238/help-your-robot/`: `data/` holds the collected runs and the LeRobot datasets (`data/lerobot/`),
+and `pi05/` holds what the Colab notebook writes (norm stats, checkpoints, logs).
+
+Then push any run directory. It is copied under `gdrive:stanford/classes/cs238/help-your-robot/data/<run name>`,
+verified by size and MD5, and nothing on Drive is deleted. `HELP_DRIVE_ROOT` and `HELP_DRIVE_REMOTE` override the destination; the script
 refuses a root rclone cannot see rather than creating a duplicate (`HELP_DRIVE_CREATE_ROOT=1` creates it):
 
 ```bash

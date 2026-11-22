@@ -4,7 +4,7 @@
 #   source env.sh
 #   scripts/push_to_drive.sh <local dir> [<path under $HELP_DRIVE_ROOT>]
 #   scripts/push_to_drive.sh $MLSPACES_ARTIFACT_ROOT/smoke/datagen/open_planner_v1/debug/droid_open_debug1
-#       -> gdrive:stanford/classes/cs238/data/droid_open_debug1
+#       -> gdrive:stanford/classes/cs238/help-your-robot/data/droid_open_debug1
 #
 # `rclone copy` only adds and updates files on Drive; it never deletes there, so re-running after more collection
 # uploads only what is new. Setup (once): see README "Google Drive".
@@ -14,7 +14,7 @@ SRC="${1:?usage: scripts/push_to_drive.sh <local dir> [<drive subpath>]}"
 [[ -d "$SRC" ]] || { echo "not a directory: $SRC" >&2; exit 2; }
 RCLONE="${RCLONE:-$HOME/micromamba/envs/tools/bin/rclone}"
 REMOTE="${HELP_DRIVE_REMOTE:-gdrive}"
-ROOT="${HELP_DRIVE_ROOT:-stanford/classes/cs238/data}"
+ROOT="${HELP_DRIVE_ROOT:-stanford/classes/cs238/help-your-robot/data}"
 DEST="$REMOTE:$ROOT/${2:-$(basename "$SRC")}"
 
 "$RCLONE" listremotes | grep -qx "$REMOTE:" || {
