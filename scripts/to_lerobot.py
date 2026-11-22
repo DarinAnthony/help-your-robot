@@ -18,6 +18,10 @@ that drove it, so observation k is paired with the command of step k + 1 and the
         data/shelf_pnp/pi05_demos/rerender_20261114 data/shelf_pnp/pi05_demos/rerender_20261113 data/shelf_pnp/pi05_demos/new_20261121
     ~/micromamba/envs/lerobot/bin/python scripts/to_lerobot.py drawer --out data/lerobot <xemb run dirs ...>
 
+Episodes are shuffled (seed 0) and ``--val-fraction`` of them (default 5%) go to a separate ``<repo-id>_val`` dataset
+that training never sees, for ``scripts/openpi_run.py check``. ``help_sources.jsonl`` in each maps every episode back to
+its source.
+
 Shelf: every episode in the roots' ``episodes.jsonl`` files with outcome success (and, for re-renders, ``reproduced``)
 and a frame on every tick; training objects only. Drawer: every trajectory with task success.
 """
@@ -28,6 +32,7 @@ import argparse
 import glob
 import json
 import os
+import random
 import shutil
 from pathlib import Path
 
@@ -154,6 +159,7 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=Path("data/lerobot"))
     p.add_argument("--repo-id", default=None, help="default help/<task>_pi05_<n episodes>")
     p.add_argument("--max-episodes", type=int, default=None)
+    p.add_argument("--val-fraction", type=float, default=0.05, help="held out as <repo-id>_val")
     a = p.parse_args()
 
     if a.task == "shelf":
@@ -164,7 +170,9 @@ def main() -> None:
         eps = list(drawer_episodes(a.sources))
         frames_of = lambda e: drawer_frames(*e)
         feats, robot = features(11, 11, DRAWER_STATE, DRAWER_ACTION), "tidybot_xarm7"
+    random.Random(0).shuffle(eps)
     eps = eps[: a.max_episodes]
+    n_val = int(round(len(eps) * a.val_fraction)) if len(eps) > 1 else 0
     repo_id = a.repo_id or f"help/{a.task}_pi05_{len(eps)}"
     os.environ["HF_LEROBOT_HOME"] = str(a.out.resolve())
     import functools
@@ -175,23 +183,28 @@ def main() -> None:
     # H.264 rather than LeRobot's default AV1: Colab's FFmpeg (behind torchcodec) may not decode AV1.
     lerobot_dataset.encode_video_frames = functools.partial(lerobot_dataset.encode_video_frames, vcodec="h264")
 
-    root = a.out.resolve() / repo_id
-    if root.exists():
-        shutil.rmtree(root)
-    ds = LeRobotDataset.create(repo_id=repo_id, root=root, robot_type=robot, fps=FPS, features=feats,
-                               image_writer_threads=4, image_writer_processes=0)
-    index = []
-    for n, e in enumerate(eps):
-        task = None
-        for frame, task in frames_of(e):
-            ds.add_frame({**frame, "task": task})
-        ds.save_episode()
-        index.append({"episode_index": n, "source": [str(x) if isinstance(x, Path) else x for x in
-                                                     (e if a.task == "drawer" else (e[0], e[1]["seed"]))], "task": task})
-        if n % 50 == 0:
-            print(f"{n + 1}/{len(eps)} episodes", flush=True)
-    (root / "help_sources.jsonl").write_text("".join(json.dumps(r) + "\n" for r in index))
-    print(f"{repo_id}: {len(eps)} episodes -> {root}")
+    def write(repo: str, episodes: list) -> None:
+        root = a.out.resolve() / repo
+        if root.exists():
+            shutil.rmtree(root)
+        ds = LeRobotDataset.create(repo_id=repo, root=root, robot_type=robot, fps=FPS, features=feats,
+                                   image_writer_threads=4, image_writer_processes=0)
+        index = []
+        for n, e in enumerate(episodes):
+            task = None
+            for frame, task in frames_of(e):
+                ds.add_frame({**frame, "task": task})
+            ds.save_episode()
+            src = e if a.task == "drawer" else (e[0], e[1]["seed"])
+            index.append({"episode_index": n, "source": [str(x) if isinstance(x, Path) else x for x in src], "task": task})
+            if n % 50 == 0:
+                print(f"{repo}: {n + 1}/{len(episodes)} episodes", flush=True)
+        (root / "help_sources.jsonl").write_text("".join(json.dumps(r) + "\n" for r in index))
+        print(f"{repo}: {len(episodes)} episodes -> {root}", flush=True)
+
+    write(repo_id, eps[n_val:])
+    if n_val:
+        write(f"{repo_id}_val", eps[:n_val])
 
 
 if __name__ == "__main__":

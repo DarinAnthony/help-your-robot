@@ -1,7 +1,10 @@
 """pi0.5 LoRA fine-tuning configs for the help! tasks, for upstream openpi (TASK_SPEC.md §2-3, §7).
 
 Written against Physical-Intelligence/openpi at ``OPENPI_COMMIT`` (the same LeRobot revision as
-``scripts/to_lerobot.py``). Nothing here edits openpi: ``register()`` adds the configs to openpi's config table, after
+``scripts/to_lerobot.py``). mikulrai/openpi was considered for its LoRA-only checkpoints and validation loss, but it adds
+a fourth image slot (``extra_0_rgb``) that is always embedded, masked or not: ~25-30% more compute per update for these
+two-camera tasks. Instead the converter writes a held-out ``<repo>_val`` dataset (``scripts/openpi_run.py check``), and
+the notebook keeps checkpoints on local disk and syncs the latest to Drive. Nothing here edits openpi: ``register()`` adds the configs to openpi's config table, after
 which openpi's own ``scripts/compute_norm_stats.py`` and ``scripts/train.py`` run them by name, and its policy server
 serves the checkpoints:
 
@@ -125,7 +128,9 @@ def train_config(task: str, repo_id: str, steps: int = 10_000, batch_size: int =
         weight_loader=W.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         freeze_filter=model().get_freeze_filter(),
         ema_decay=None,
-        lr_schedule=O.CosineDecaySchedule(warmup_steps=500, peak_lr=5e-5, decay_steps=steps, decay_lr=5e-6),
+        # 500 warmup updates, fewer on short runs (optax needs decay_steps > warmup_steps).
+        lr_schedule=O.CosineDecaySchedule(warmup_steps=min(500, steps // 10), peak_lr=5e-5,
+                                          decay_steps=steps, decay_lr=5e-6),
         optimizer=O.AdamW(clip_gradient_norm=1.0),
         batch_size=batch_size,
         num_train_steps=steps,

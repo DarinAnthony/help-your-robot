@@ -37,12 +37,14 @@ boundary; difficulty comes from pi0.5's own failures plus injected faults.
 | Attempt limit | 20 s (300 ticks; expert attempts take 10–12 s); 3 attempts per episode |
 
 **Training data.** Every successful expert episode on the 9 training objects, including those that succeeded on a
-retry (they show recovery), from all four expert modes of 2026-11-13/14: about 640. The rendered videos are 5 Hz, but
+retry (they show recovery), from all four expert modes of 2026-11-13/14: 435 (tape has none: the expert never
+succeeds with it). The rendered videos are 5 Hz, but
 pi0.5 needs a frame on every 15 Hz step. Episodes are deterministic in their seed, so the successes are re-run with
 `--render-every 1 --rerender-from <old run>` (`scripts/collect_shelf_pnp.py`); every re-run is checked to reproduce
 its outcome, and the first ones matched the originals' states exactly. **More data:** 1,050 new nominal episodes on the
 7 objects the expert can do plus 150 weak-grip banana episodes (the mode where the banana succeeds), about 600 more
-successes, for about 1,250 demos (`data/shelf_pnp/pi05_demos/`).
+successes, for about 1,000 demos (`data/shelf_pnp/pi05_demos/`). 5% of them, chosen at random, are held out
+(`help/shelf_pi05_val`) for the open-loop check.
 
 ## 3. Task B: drawer opening (TidyBot)
 
@@ -57,7 +59,7 @@ successes, for about 1,250 demos (`data/shelf_pnp/pi05_demos/`).
 | Attempt limit | 25 s per pull; 3 pulls per episode |
 
 **Training data.** Successful **nominal** episodes only, so every fault drawer stays unseen by pi0.5: 70 now
-(20261113b, 20261114, the re-pull nominal run) plus 300 new (`scripts/collect_drawer_open.sh`, after the shelf
+(20261113b, 20261114, the re-pull nominal run) plus 300 new, 5% held out as `help/drawer_pi05_val` (`scripts/collect_drawer_open.sh`, after the shelf
 collection: the two do not fit in memory together). `tidybot_open_20261113` is left out (its preview cameras predate the
 hooks).
 
@@ -125,12 +127,19 @@ base deltas within each chunk with the gripper absolute, pi0.5 LoRA from `pi05_b
 
 | Piece | File |
 |---|---|
-| Expert episodes → LeRobot (180×320 H.264 video, absolute actions, observation k with the command of step k+1) | `scripts/to_lerobot.py` |
+| Expert episodes → LeRobot (180×320 H.264 video, absolute actions, observation k with the command of step k+1), 95% train / 5% `_val` | `scripts/to_lerobot.py` |
 | openpi configs | `helpsim/openpi_help.py` |
-| Norm stats, training, policy server | `scripts/openpi_run.py` |
+| Norm stats, training, open-loop check on `_val`, policy server | `scripts/openpi_run.py` |
+| Seconds per update and the run size, from the training log | `scripts/step_timer.py` |
 | Colab notebook | `notebooks/pi05_train_colab.ipynb` |
 
-Checked on the Mac (openpi on CPU): both tasks' test datasets load through openpi's data pipeline and give norm stats.
+mikulrai/openpi was also considered, for its LoRA-only checkpoints and validation loss. It adds a fourth image slot
+that is always embedded, even when masked, so each update costs ~25–30% more on these two-camera tasks. Upstream is
+used instead: the held-out `_val` dataset gives the validation, and the notebook keeps checkpoints on local disk and
+mirrors them to Drive every 5 minutes. A full pi0.5 checkpoint is ~7 GB, so Drive holds the latest plus every 5000th.
+
+Checked on the Mac (openpi on CPU): both tasks' test datasets load through openpi's data pipeline and give norm stats;
+the shelf config trains, checkpoints, resumes and runs the open-loop check end to end with dummy-size Gemma weights.
 
 - **Training:** Colab, 200 compute units (A100 class), data and checkpoints on Drive.
 - **Evaluation (recommended):** the sim stays on the Mac, which already has every asset. pi0.5 runs on Colab as
@@ -167,5 +176,6 @@ complete project, with pi0.5 as the extension.
 1. **One joint model or two:** two, shelf first (decided 2026-11-21).
 2. **Action representation:** joint position targets as collected, trained as deltas from each chunk's first state
    (openpi's convention for absolute-action data); the policy returns absolute targets (decided 2026-11-21).
-3. **The tunnel** for the policy server (ngrok or cloudflared): it exposes a Colab port to the internet while serving.
+3. **The tunnel** for the policy server: a Cloudflare quick tunnel (no account) in the notebook. It exposes the
+   policy server to anyone with the URL while it runs.
 4. **A time cost** in the reward beyond c_fail: none by default.
