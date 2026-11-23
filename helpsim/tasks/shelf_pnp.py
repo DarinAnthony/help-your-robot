@@ -64,7 +64,8 @@ class Recorder:
 
 
 class ShelfPnP:
-    PHASES = ("settle", "approach", "grasp", "close", "lift", "carry", "lower", "release", "retreat")
+    PHASES = ("settle", "approach", "grasp", "close", "lift", "carry", "lower", "release", "retreat",
+              "policy", "reset")   # the last two: pi0.5 rollouts (helpsim/pi05_shelf.py)
 
     def __init__(self, obj: str, station: str = "droid_corner_20261029", render: bool = True,
                  size: tuple[int, int] = (180, 320), render_every: int = 3, **faults):

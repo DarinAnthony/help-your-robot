@@ -74,13 +74,22 @@ The scripted expert's attempts were discrete. pi0.5 runs closed loop, so an atte
 |---|---|---|
 | **success** | object on the shelf within 5 cm, at rest for 0.5 s | drawer judged open |
 | **grasp miss** | gripper closed with no object contact, or the object not lifted 3 cm within 2 s of closing | gripper closed without the handle |
-| **slip / drop** | the object leaves the gripper while carried and comes to rest off the shelf | hold lost during the pull |
+| **slip / drop** | the object leaves the closed gripper in the air while carried and comes to rest on the shelf off the target | hold lost during the pull |
 | **stall** | — | drawer travel under 5 mm over 2 s while holding |
 | **off shelf** (terminal) | the object fell off the counter or shelf | — |
 | **place miss** | released on the shelf more than 5 cm from the target | — |
 | **timeout** | no other event within the attempt limit | the same |
 
 The outcome type is part of the help model's observation.
+
+Shelf: `helpsim/pi05_shelf.py` (`AttemptMonitor`, checked on every 15 Hz tick). "At rest" is the object's centre of
+mass under 2 cm/s for 0.5 s. A placement is judged once the gripper is 10 cm clear of the object (or 3 s after letting
+go), so an object the retreat knocks or that rolls off afterwards counts as such. Contact lost with the gripper lowered
+back to the shelf is a placement; with it raised, a slip. `scripts/pi05_rollouts.py replay-test` plays recorded expert
+episodes back through the same closed loop and compares the monitor with the expert's labels. A weak grip that loses
+the object during the lift, before it is 3 cm up, reads as a grasp miss, as the table defines it; the expert's
+"unreachable" (an IK failure) has no pi0.5 counterpart. Replays are not bit-exact (the expert's IK touched the sim
+state), so a rolling object can end differently from the recording.
 
 ## 5. The help decision
 
@@ -114,8 +123,9 @@ Difficulty is defined per start from outcomes, as before (easy / recoverable / i
   - drawer: hard, stuck, locked, transient stop, weak grip.
 
 The exact offline evaluation needs, per start, what every decision would have led to. As with the expert trees, the
-sim state is saved at each decision point and both continue and reset-and-retry are run from it: at most 14 pi0.5
-attempts per start. pi0.5 samples, so each branch is one draw. For the calibration split, 3 draws per branch give
+sim state is saved at each decision point and both continue and reset-and-retry are run from it. The first attempt
+starts at home, where the two are the same, so a start costs at most 1 + 2 + 4 = 7 pi0.5 attempts
+(`ShelfRollout.run_tree`; `scripts/pi05_rollouts.py trees`). pi0.5 samples, so each branch is one draw. For the calibration split, 3 draws per branch give
 outcome probabilities.
 
 ## 7. Where things run
@@ -132,6 +142,8 @@ base deltas within each chunk with the gripper absolute, pi0.5 LoRA from `pi05_b
 | Norm stats, training, open-loop check on `_val`, policy server | `scripts/openpi_run.py` |
 | Seconds per update and the run size, from the training log | `scripts/step_timer.py` |
 | Colab notebook | `notebooks/pi05_train_colab.ipynb` |
+| pi0.5 in the shelf sim (closed loop, attempt monitor, reset, decisions, trees, pi0.5's spread) | `helpsim/pi05_shelf.py` |
+| Episodes and trees against the policy server; the replay test | `scripts/pi05_rollouts.py` |
 
 mikulrai/openpi was also considered, for its LoRA-only checkpoints and validation loss. It adds a fourth image slot
 that is always embedded, even when masked, so each update costs ~25–30% more on these two-camera tasks. Upstream is
