@@ -144,11 +144,17 @@ base deltas within each chunk with the gripper absolute, pi0.5 LoRA from `pi05_b
 | Colab notebook | `notebooks/pi05_train_colab.ipynb` |
 | pi0.5 in the shelf sim (closed loop, attempt monitor, reset, decisions, trees, pi0.5's spread) | `helpsim/pi05_shelf.py` |
 | Episodes and trees against the policy server; the replay test | `scripts/pi05_rollouts.py` |
+| pi0.5 in the drawer sim: xemb's collection pipeline with `Pi05TidybotPolicy` in place of the planner | `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` |
+| Help-policy evaluation on trees (value functions, baselines, belief POMDP) | `helpsim/help/`, `scripts/help_eval.py` |
 
 mikulrai/openpi was also considered, for its LoRA-only checkpoints and validation loss. It adds a fourth image slot
 that is always embedded, even when masked, so each update costs ~25–30% more on these two-camera tasks. Upstream is
 used instead: the held-out `_val` dataset gives the validation, and the notebook keeps checkpoints on local disk and
 mirrors them to Drive every 5 minutes. A full pi0.5 checkpoint is ~7 GB, so Drive holds the latest plus every 5000th.
+
+Both sim clients were checked against openpi's own websocket server with a stand-in policy (keys, 180x320 images,
+state, prompt), and the drawer's against a recorded episode replayed through it (same start to the bit, drawer
+opened).
 
 Checked on the Mac (openpi on CPU): both tasks' test datasets load through openpi's data pipeline and give norm stats;
 the shelf config trains, checkpoints, resumes and runs the open-loop check end to end with dummy-size Gemma weights.

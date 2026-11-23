@@ -203,10 +203,12 @@ class ShelfRollout:
         for k in range(max_attempts):
             dp = self.decision(policy, n_samples)
             choice = decide(k, [a["outcome"] for a in attempts], dp) if decide else "continue"
+            if choice == "reset" and k == 0:
+                choice = "continue"     # the first attempt starts at home: a reset would change nothing
             decisions.append({"attempt": k, "choice": choice, **dp})
             if choice == "ask":
                 break
-            if choice == "reset" and k > 0:
+            if choice == "reset":
                 self.reset_arm()
             outcome, info = self.attempt(policy)
             attempts.append({"attempt": k, "outcome": outcome, **info})
