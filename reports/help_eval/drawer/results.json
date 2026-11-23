@@ -19,7 +19,7 @@
   "infeasible": 19
  },
  "predictors": {
-  "V/in_distribution/k0": {
+  "V0/in_distribution/k0": {
    "n": 37,
    "base_rate": 0.4864864864864865,
    "auroc": 0.5,
@@ -34,7 +34,7 @@
     ]
    ]
   },
-  "V/in_distribution/k1": {
+  "V0/in_distribution/k1": {
    "n": 26,
    "base_rate": 0.2692307692307692,
    "auroc": 0.9849624060150376,
@@ -64,7 +64,7 @@
     ]
    ]
   },
-  "V/in_distribution/k2": {
+  "V0/in_distribution/k2": {
    "n": 20,
    "base_rate": 0.05,
    "auroc": 0.8947368421052632,

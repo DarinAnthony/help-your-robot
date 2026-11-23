@@ -84,3 +84,51 @@ def calibration_metrics(y: np.ndarray, p: np.ndarray, bins: int = 10) -> dict:
             curve.append([float(p[sel].mean()), float(y[sel].mean()), int(sel.sum())])
     return {"n": int(len(y)), "base_rate": float(y.mean()), "auroc": auroc(y, p), "brier": float(((p - y) ** 2).mean()),
             "nll": float(-(y * np.log(p) + (1 - y) * np.log(1 - p)).mean()), "ece": float(ece), "reliability": curve}
+
+
+class MLP:
+    """Binary classifier: one tanh hidden layer on standardized inputs, L2 on the weights, fit by L-BFGS."""
+
+    def __init__(self, hidden: int = 32, l2: float = 1.0, seed: int = 0):
+        self.h, self.l2, self.seed = hidden, l2, seed
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "MLP":
+        X, y = np.asarray(X, float), np.asarray(y, float)
+        self.mu, self.sd = X.mean(0), X.std(0) + 1e-6
+        Z = (X - self.mu) / self.sd
+        n, d = Z.shape
+        h = self.h
+        shapes = [(d, h), (h,), (h,), ()]
+        sizes = [int(np.prod(s)) for s in shapes]
+
+        def unpack(w):
+            out, i = [], 0
+            for s, k in zip(shapes, sizes):
+                out.append(w[i:i + k].reshape(s))
+                i += k
+            return out
+
+        def loss(w):
+            W1, b1, w2, b2 = unpack(w)
+            A = np.tanh(Z @ W1 + b1)
+            z = A @ w2 + b2
+            # -log-likelihood of y under sigmoid(z), stably
+            nll = (np.logaddexp(0, z) - y * z).sum()
+            g = expit(z) - y
+            gw2, gb2 = A.T @ g, g.sum()
+            dA = np.outer(g, w2) * (1 - A ** 2)
+            gW1, gb1 = Z.T @ dA, dA.sum(0)
+            reg = 0.5 * self.l2 * ((W1 ** 2).sum() + (w2 ** 2).sum())
+            grad = np.concatenate([(gW1 + self.l2 * W1).ravel(), gb1, gw2 + self.l2 * w2, [gb2]])
+            return nll + reg, grad
+
+        rng = np.random.default_rng(self.seed)
+        w0 = np.concatenate([rng.normal(0, 1 / np.sqrt(d), d * h), np.zeros(h), rng.normal(0, 1 / np.sqrt(h), h), [0.0]])
+        self.w = minimize(loss, w0, jac=True, method="L-BFGS-B", options={"maxiter": 500}).x
+        self._unpack = unpack
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        W1, b1, w2, b2 = self._unpack(self.w)
+        Z = (np.asarray(X, float) - self.mu) / self.sd
+        return expit(np.tanh(Z @ W1 + b1) @ w2 + b2)

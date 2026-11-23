@@ -44,13 +44,13 @@ Tuned on cal: {'tau_B6': 0.16, 'tau_B5': 0.0, 'k_B3': 2, 'q_B4': 0.1140350877192
 | 8 | 1 | 3.93 | 3.99 | -0.06 [-0.12, -0.01] | B6 Vk threshold (3.99) | -0.06 [-0.12, -0.01] |
 | 8 | 2 | 3.28 | 3.34 | -0.06 [-0.15, +0.00] | B6 Vk threshold (3.34) | -0.06 [-0.15, +0.00] |
 
-## Predictors on test (V_k: P(success | the default continuation))
+## Predictors on test (V_k: P(success | the default continuation); V0 hand features, V1 DINOv2 frames + proprioception + history)
 
 | predictor | n | base rate | AUROC | Brier | NLL | ECE |
 |---|---|---|---|---|---|---|
-| V/in_distribution/k0 | 37 | 0.49 | 0.500 | 0.250 | 0.694 | 0.025 |
-| V/in_distribution/k1 | 26 | 0.27 | 0.985 | 0.052 | 0.160 | 0.047 |
-| V/in_distribution/k2 | 20 | 0.05 | 0.895 | 0.038 | 0.115 | 0.011 |
+| V0/in_distribution/k0 | 37 | 0.49 | 0.500 | 0.250 | 0.694 | 0.025 |
+| V0/in_distribution/k1 | 26 | 0.27 | 0.985 | 0.052 | 0.160 | 0.047 |
+| V0/in_distribution/k2 | 20 | 0.05 | 0.895 | 0.038 | 0.115 | 0.011 |
 
 | difficulty head | n | accuracy | NLL | mean prior (easy, recoverable, infeasible) | true mix |
 |---|---|---|---|---|---|

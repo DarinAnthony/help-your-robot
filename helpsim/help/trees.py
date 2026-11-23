@@ -55,6 +55,7 @@ class Tree:
     target: np.ndarray
     nodes: dict = field(repr=False)
     fold: str = ""          # train / cal / test (assign_folds)
+    frames: str = ""        # the tree's decision-frame npz (``tree_<seed>.npz``), if any
 
     @property
     def spec(self) -> dict:
@@ -96,7 +97,7 @@ def load_trees(root: Path, family: str) -> list[Tree]:
             if target is None:
                 raise ValueError(f"{f}: no target in tree records")
             out.append(Tree(family, r.get("mode", "nominal"), r["object"], split, r["seed"], np.array(start),
-                            np.array(target), nodes))
+                            np.array(target), nodes, frames=str(f.parent / f"tree_{r['seed']:05d}.npz")))
     return out
 
 

@@ -5,6 +5,10 @@ fold, calibrated (Platt) and tuned (thresholds, k) on the cal fold, and scored o
 
 - ``ValueModel``: V_k = P(success | the decision point, the default continuation); hand features (``trees.features``),
   logistic regression, Platt-scaled.
+- ``ImageValueModel`` (V1): the same target from frozen DINOv2 embeddings of the decision frames (``scripts/
+  embed_trees.py``; PCA fit on train) plus proprioception and attempt history, a 5-member bootstrap ensemble of small
+  MLPs, Platt-scaled. It never sees the object's identity, physical properties or pose.
+- ``ImageDifficultyHead``: P(d | the start's frames), for the image-prior ablation (H3).
 - ``DifficultyHead``: P(d | start) for d in easy / recoverable / infeasible, multinomial logistic regression on the
   start's features: the POMDP's prior.
 - ``ObservationModel``: P(outcome | d, action, attempt index), counted on the train trees (every played-out child).
@@ -19,9 +23,9 @@ from __future__ import annotations
 
 import numpy as np
 
-from helpsim.help.models import Logistic, Platt
+from helpsim.help.models import MLP, Logistic, Platt
 from helpsim.help.trees import (DIFFICULTIES, MAX_ATTEMPTS, Costs, Tree, decision_points, default_action,
-                                default_success, features, outcome_reward, static_features, view)
+                                default_success, features, history_features, outcome_reward, static_features, view)
 
 
 # ---------------------------------------------------------------- predictors
@@ -50,6 +54,109 @@ class ValueModel:
         if key not in self.cache:
             self.cache[key] = float(self.platt(self.lr.predict_proba(features(v)[None])[:, 1])[0])
         return self.cache[key]
+
+
+class Embeddings:
+    """Per-node frame embeddings (``scripts/embed_trees.py``): ``get(tree, path)`` -> (cameras * 768,)."""
+
+    def __init__(self, npz):
+        z = np.load(npz)
+        self.index = {k: i for i, k in enumerate(z["keys"].tolist())}
+        self.emb = z["emb"].reshape(len(self.index), -1).astype(np.float32)
+
+    def has(self, tree: Tree) -> bool:
+        return f"{tree.key}|" in self.index
+
+    def get(self, tree: Tree, path: str) -> np.ndarray:
+        return self.emb[self.index[f"{tree.key}|{path}"]]
+
+
+class PCA:
+    def __init__(self, n: int):
+        self.n = n
+
+    def fit(self, X: np.ndarray) -> "PCA":
+        self.mu = X.mean(0)
+        _, s, vt = np.linalg.svd(X - self.mu, full_matrices=False)
+        self.vt, self.scale = vt[:self.n], s[:self.n] / np.sqrt(len(X))
+        return self
+
+    def __call__(self, X: np.ndarray) -> np.ndarray:
+        return (np.atleast_2d(X) - self.mu) @ self.vt.T / self.scale
+
+
+def proprio_history(v: dict) -> np.ndarray:
+    """The robot's own state (arm joints, gripper) and the attempt history (index, outcomes, failure phases), without
+    the object's simulated pose (the last 5 entries of ``history_features``)."""
+    st = v["state"]
+    return np.concatenate([np.asarray(st["arm_qpos"], float), [st["gripper_pos"]], history_features(v)[:-5]])
+
+
+class ImageValueModel:
+    """V1: P(success | the default continuation) from the decision frames, proprioception and history."""
+
+    def __init__(self, emb: Embeddings, pc_grid: tuple = (16, 32, 64, 128), members: int = 5, hidden: int = 32,
+                 l2_grid: tuple = (3.0, 10.0, 30.0, 100.0, 300.0)):
+        self.emb, self.pc_grid, self.members, self.hidden, self.l2_grid = emb, pc_grid, members, hidden, l2_grid
+        self.cache = {}
+
+    def _raw(self, trees):
+        E, X, y = [], [], []
+        for t, path, v in decision_points(trees):
+            E.append(self.emb.get(t, path))
+            X.append(proprio_history(v))
+            y.append(default_success(t, path))
+        return np.array(E), np.array(X), np.array(y, int)
+
+    @staticmethod
+    def _ens(models, Xf):
+        return np.mean([m.predict_proba(Xf) for m in models], 0)
+
+    def fit(self, train: list[Tree], cal: list[Tree]) -> "ImageValueModel":
+        E, X, y = self._raw(train)
+        Ec, Xc, yc = self._raw(cal)
+        pca_full = PCA(max(self.pc_grid)).fit(E)
+        rng = np.random.default_rng(0)
+        boots = [rng.integers(0, len(y), len(y)) for _ in range(self.members)]
+        best, self.nll = None, {}
+        for n_pc in self.pc_grid:      # PCA size and weight penalty: the best calibration-fold likelihood
+            Xf, Xcf = np.c_[pca_full(E)[:, :n_pc], X], np.c_[pca_full(Ec)[:, :n_pc], Xc]
+            for l2 in self.l2_grid:
+                models = [MLP(self.hidden, l2, seed=i).fit(Xf[b], y[b]) for i, b in enumerate(boots)]
+                p = np.clip(self._ens(models, Xcf), 1e-6, 1 - 1e-6)
+                nll = float(-(yc * np.log(p) + (1 - yc) * np.log(1 - p)).mean())
+                self.nll[(n_pc, l2)] = nll
+                if best is None or nll < best[0]:
+                    best = (nll, n_pc, l2, models, p)
+        _, self.n_pc, self.l2, self.models, p = best
+        self.pca = pca_full
+        self.platt = Platt().fit(p, yc)
+        return self
+
+    def __call__(self, v: dict) -> float:
+        key = (v["tree"].key, v["path"])
+        if key not in self.cache:
+            xf = np.c_[self.pca(self.emb.get(v["tree"], v["path"]))[:, :self.n_pc], proprio_history(v)[None]]
+            self.cache[key] = float(self.platt(self._ens(self.models, xf))[0])
+        return self.cache[key]
+
+
+class ImageDifficultyHead:
+    """P(d | the start's frames): multinomial logistic regression on the PCA of the root embeddings."""
+
+    def __init__(self, emb: Embeddings, n_pc: int = 32, l2: float = 3.0):
+        self.emb, self.n_pc, self.l2 = emb, n_pc, l2
+
+    def fit(self, train: list[Tree]) -> "ImageDifficultyHead":
+        E = np.array([self.emb.get(t, "") for t in train])
+        self.pca = PCA(self.n_pc).fit(E)
+        y = np.array([DIFFICULTIES.index(t.difficulty) for t in train])
+        self.lr = Logistic(self.l2).fit(self.pca(E), y, len(DIFFICULTIES))
+        self.freq = np.bincount(y, minlength=len(DIFFICULTIES)) / len(y)
+        return self
+
+    def __call__(self, tree: Tree) -> np.ndarray:
+        return self.lr.predict_proba(self.pca(self.emb.get(tree, "")))[0]
 
 
 class DifficultyHead:

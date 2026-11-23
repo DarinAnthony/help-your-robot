@@ -90,30 +90,33 @@ def paired(a: list[dict], b: list[dict], rng) -> dict:
     return out
 
 
-def predictor_metrics(V, head, trees) -> dict:
+def predictor_metrics(Vs: dict, heads: dict, trees) -> dict:
     out = {}
     for name, sel in (("in_distribution", lambda t: t.split == "train"), ("orange", lambda t: t.object == "orange"),
                       ("metal_spoon", lambda t: t.object == "metal_spoon")):
         ts = [t for t in trees if sel(t)]
-        for k in range(3):
-            y, p = [], []
-            for t, path, v in decision_points(ts):
-                if v["k"] == k:
-                    y.append(default_success(t, path))
-                    p.append(V(v))
-            if y:
-                out[f"V/{name}/k{k}"] = calibration_metrics(np.array(y), np.array(p))
-        if ts:
+        for vname, V in Vs.items():
+            for k in range(3):
+                y, p = [], []
+                for t, path, v in decision_points(ts):
+                    if v["k"] == k:
+                        y.append(default_success(t, path))
+                        p.append(V(v))
+                if y:
+                    out[f"{vname}/{name}/k{k}"] = calibration_metrics(np.array(y), np.array(p))
+        for hname, head in heads.items():
+            if not ts:
+                continue
             pred = np.array([head(t) for t in ts])
             true = np.array([DIFFICULTIES.index(t.difficulty) for t in ts])
-            out[f"difficulty/{name}"] = {"n": len(ts), "accuracy": float((pred.argmax(1) == true).mean()),
+            out[f"{hname}/{name}"] = {"n": len(ts), "accuracy": float((pred.argmax(1) == true).mean()),
                                          "nll": float(-np.log(pred[np.arange(len(ts)), true] + 1e-9).mean()),
                                          "mean_prior": pred.mean(0).round(3).tolist(),
                                          "true_mix": (np.bincount(true, minlength=3) / len(true)).round(3).tolist()}
     return out
 
 
-def evaluate(trees, family, rng, costs_grid) -> dict:
+def evaluate(trees, family, rng, costs_grid, emb=None) -> dict:
     train = [t for t in trees if t.fold == "train"]
     cal = [t for t in trees if t.fold == "cal"]
     test = [t for t in trees if t.fold == "test"]
@@ -123,10 +126,19 @@ def evaluate(trees, family, rng, costs_grid) -> dict:
     obs = P.ObservationModel(spec, travel_bins=P.DRAWER_TRAVEL_BINS if family == "drawer" else None).fit(train)
     obs_coarse = P.ObservationModel(spec, coarse=True).fit(train)
     onehot = lambda t: np.eye(3)[DIFFICULTIES.index(t.difficulty)]
+    Vs, heads = {"V0": V}, {"difficulty": head}
+    if emb is not None:     # V1 and the image prior (scripts/embed_trees.py)
+        t0 = time.time()
+        V1 = P.ImageValueModel(emb).fit(train, cal)
+        head_img = P.ImageDifficultyHead(emb).fit(train)
+        Vs["V1"], heads["difficulty_img"] = V1, head_img
+        print(f"V1 fit in {time.time() - t0:.0f}s (PCA {V1.n_pc}, l2 {V1.l2})", flush=True)
     res = {"folds": {f: len([t for t in trees if t.fold == f]) for f in ("train", "cal", "test")},
            "test_groups": {g: sum(group(t) == g for t in test) for g in sorted({group(t) for t in test})},
            "test_difficulty": {d: sum(t.difficulty == d for t in test) for d in DIFFICULTIES},
-           "predictors": predictor_metrics(V, head, test), "costs": {}}
+           "predictors": predictor_metrics(Vs, heads, test), "costs": {}}
+    if emb is not None:
+        res["V1_selection"] = {"pca": V1.n_pc, "l2": V1.l2, "cal_nll": {f"{k[0]},{k[1]:g}": v for k, v in V1.nll.items()}}
     for c_help in costs_grid[0]:
         for c_fail in costs_grid[1]:
             t0 = time.time()
@@ -152,6 +164,11 @@ def evaluate(trees, family, rng, costs_grid) -> dict:
             }
             if family == "expert":
                 methods["A4 Ours, attempt only"] = P.BeliefPlanner(obs, head, c, actions=("A",))
+            if emb is not None:
+                tau6i, _ = tune(cal, lambda g: P.v_threshold(V1, g), TAUS, c)
+                methods["B6' V1_k threshold (images)"] = P.v_threshold(V1, tau6i)
+                methods["B7' myopic EU, V1"] = P.myopic(V1, c)
+                methods["A5 Ours, image prior"] = P.BeliefPlanner(obs, head_img, c)
             rows = {name: score(test, pol, c) for name, pol in methods.items()}
             # B4: random asks at Ours's voluntary-ask rate per decision (expected over repeats).
             ours_rate = np.mean([x["voluntary"] for x in rows["Ours belief POMDP"]])
@@ -166,7 +183,8 @@ def evaluate(trees, family, rng, costs_grid) -> dict:
                                       "reward_ci": boot_ci(np.array(list(o2.values())), rng)}
             diffs = {name: paired(rows["Ours belief POMDP"], r, rng) for name, r in rows.items()
                      if name != "Ours belief POMDP"}
-            res["costs"][f"{c_help},{c_fail}"] = {"c_help": c_help, "c_fail": c_fail, "tuned": {"tau_B6": float(tau6),
+            tuned_v1 = {"tau_B6'": float(tau6i)} if emb is not None else {}
+            res["costs"][f"{c_help},{c_fail}"] = {"c_help": c_help, "c_fail": c_fail, "tuned": {**tuned_v1, "tau_B6": float(tau6),
                                                   "tau_B5": float(tau5), "k_B3": k_best, "q_B4": q},
                                                   "methods": summ, "ours_minus": diffs}
             print(f"c_help {c_help} c_fail {c_fail}: Ours {summ['Ours belief POMDP']['reward']:.2f}  "
@@ -271,6 +289,34 @@ def figures(res: dict, out: Path, family: str) -> list[str]:
     fig.savefig(out / "per_condition_gap.png", dpi=160)
     plt.close(fig)
     made.append("per_condition_gap.png")
+
+    # 4. reliability of V0 and V1 in distribution, per decision index (only with V1)
+    pr = res["predictors"]
+    if any(k.startswith("V1/") for k in pr):
+        fig, axes = plt.subplots(1, 3, figsize=(9.6, 3.5), facecolor=SURFACE, sharey=True)
+        for k, ax in enumerate(axes):
+            _style(ax)
+            ax.plot([0, 1], [0, 1], color=INK2, linewidth=1, linestyle=(0, (3, 3)))
+            for color, name in zip(SERIES, ("V0", "V1")):
+                m = pr.get(f"{name}/in_distribution/k{k}")
+                if not m:
+                    continue
+                x, y, n = np.array(m["reliability"]).T
+                ax.plot(x, y, color=color, linewidth=1.5, zorder=3)
+                ax.scatter(x, y, s=12 + 60 * n / n.max(), color=color, edgecolor=SURFACE, linewidth=1.5, zorder=4,
+                           label=f"{name} (ECE {m['ece']:.3f}, AUROC {m['auroc']:.2f})")
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.set_title(f"decision k = {k}", color=INK, fontsize=10, loc="left")
+            ax.set_xlabel("predicted P(success)", color=INK, fontsize=9)
+            ax.legend(frameon=False, fontsize=8, labelcolor=INK, loc="upper left")
+        axes[0].set_ylabel("observed success rate", color=INK, fontsize=9)
+        fig.suptitle("Reliability of V0 (hand features) and V1 (images) on in-distribution test starts; marker area = bin size",
+                     color=INK, fontsize=10, x=0.01, ha="left")
+        fig.tight_layout()
+        fig.savefig(out / "reliability_v0_v1.png", dpi=160)
+        plt.close(fig)
+        made.append("reliability_v0_v1.png")
     return made
 
 
@@ -302,14 +348,14 @@ def summary_md(res: dict, family: str, figs: list[str]) -> str:
         L.append(f"| {cc['c_help']} | {cc['c_fail']} | {m['Ours belief POMDP']['reward']:.2f} | {m['B6 Vk threshold']['reward']:.2f} | "
                  f"{d6['diff']:+.2f} [{d6['ci'][0]:+.2f}, {d6['ci'][1]:+.2f}] | {best} ({others[best]['reward']:.2f}) | "
                  f"{db['diff']:+.2f} [{db['ci'][0]:+.2f}, {db['ci'][1]:+.2f}] |")
-    L += ["", "## Predictors on test (V_k: P(success | the default continuation))", "",
+    L += ["", "## Predictors on test (V_k: P(success | the default continuation); V0 hand features, V1 DINOv2 frames + proprioception + history)", "",
           "| predictor | n | base rate | AUROC | Brier | NLL | ECE |", "|---|---|---|---|---|---|---|"]
     for k, s in res["predictors"].items():
-        if k.startswith("V/"):
+        if k.startswith("V"):
             L.append(f"| {k} | {s['n']} | {s['base_rate']:.2f} | {s['auroc']:.3f} | {s['brier']:.3f} | {s['nll']:.3f} | {s['ece']:.3f} |")
     L += ["", "| difficulty head | n | accuracy | NLL | mean prior (easy, recoverable, infeasible) | true mix |", "|---|---|---|---|---|---|"]
     for k, s in res["predictors"].items():
-        if k.startswith("difficulty/"):
+        if k.startswith("difficulty"):
             L.append(f"| {k} | {s['n']} | {s['accuracy']:.2f} | {s['nll']:.3f} | {s['mean_prior']} | {s['true_mix']} |")
     L += [""] + [f"![{f}]({f})" for f in figs] + [""]
     return "\n".join(L)
@@ -322,12 +368,19 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--quick", action="store_true", help="only the default costs")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-images", action="store_true", help="skip V1 even if <trees>/dinov2_vits14.npz exists")
     a = p.parse_args()
     trees = load_drawer_trees(a.trees) if a.family == "drawer" else load_trees(a.trees, a.family)
     assign_folds(trees, seed=a.seed)
     print(f"{len(trees)} trees; folds", {f: sum(t.fold == f for t in trees) for f in ("train", "cal", "test")}, flush=True)
     grid = ((DEFAULT[0],), (DEFAULT[1],)) if a.quick else (C_HELP, C_FAIL)
-    res = evaluate(trees, a.family, np.random.default_rng(a.seed), grid)
+    emb = None
+    if a.family != "drawer" and (a.trees / "dinov2_vits14.npz").exists() and not a.no_images:
+        emb = P.Embeddings(a.trees / "dinov2_vits14.npz")
+        missing = sum(not emb.has(t) for t in trees)
+        if missing:
+            raise SystemExit(f"{missing} trees have no embeddings: rerun scripts/embed_trees.py")
+    res = evaluate(trees, a.family, np.random.default_rng(a.seed), grid, emb)
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "results.json").write_text(json.dumps(res, indent=1))
     figs = [] if a.quick else figures(res, a.out, a.family)

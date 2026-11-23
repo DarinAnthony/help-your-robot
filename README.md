@@ -23,6 +23,7 @@ The research plan is [`PLAN.md`](PLAN.md) and the experiment (hypotheses, evalua
 | `helpsim/pi05_shelf.py`, `scripts/pi05_rollouts.py` | pi0.5 in the shelf sim against the policy server: attempt monitor (TASK_SPEC.md §4), reset and retry, help decisions, continue/reset trees; `replay-test` checks the monitor on expert episodes |
 | `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` | pi0.5 in the drawer sim: xemb's collection pipeline with a pi0.5 TidyBot policy in place of the planner |
 | `helpsim/help/`, `scripts/help_eval.py` | The help study: exact scoring on trees, value functions, baselines, belief POMDP; reports in `reports/help_eval/<family>/` |
+| `scripts/embed_trees.py` | DINOv2 ViT-S/14 embeddings of every tree node's frames, for the V1 image value function |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |
 | `data/` | Generated outputs (git-ignored) |
 

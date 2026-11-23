@@ -146,6 +146,7 @@ base deltas within each chunk with the gripper absolute, pi0.5 LoRA from `pi05_b
 | Episodes and trees against the policy server; the replay test | `scripts/pi05_rollouts.py` |
 | pi0.5 in the drawer sim: xemb's collection pipeline with `Pi05TidybotPolicy` in place of the planner | `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` |
 | Help-policy evaluation on trees (value functions, baselines, belief POMDP) | `helpsim/help/`, `scripts/help_eval.py` |
+| Frozen DINOv2 embeddings of tree frames (for V1) | `scripts/embed_trees.py` |
 
 mikulrai/openpi was also considered, for its LoRA-only checkpoints and validation loss. It adds a fourth image slot
 that is always embedded, even when masked, so each update costs ~25–30% more on these two-camera tasks. Upstream is

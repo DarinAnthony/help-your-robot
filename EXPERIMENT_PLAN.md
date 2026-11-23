@@ -150,14 +150,29 @@ going).
 4. **Outcome type:** failure categories against success/failure only.
 5. **Adjust:** with adjust against attempt only (shelf).
 
-**Implemented (2026-11-23):** `helpsim/help/` (trees, exact scoring, features, the predictors, every method above except
-the V1 image ensemble) and `scripts/help_eval.py`, which writes `reports/help_eval/<family>/summary.md`. The same code
-scores pi0.5's continue/reset trees (`--family pi05`). First run on the expert trees (`reports/help_eval/expert/`):
-Ours beats B6 at low c_fail (CI excludes 0 in 6 of 15 cost settings; never significantly worse), QMDP matches Ours (no
+**Implemented (2026-11-23):** `helpsim/help/` (trees, exact scoring, features, the predictors, every method above) and
+`scripts/help_eval.py`, which writes `reports/help_eval/<family>/summary.md`. The same code scores pi0.5's
+continue/reset trees (`--family pi05`). First run on the expert trees (`reports/help_eval/expert/`):
+Ours beats B6 at low c_fail (CI excludes 0 in 5 of 15 cost settings, 6 in the first run: the default setting's lower
+bound sits at 0.00 and moves with the bootstrap draws; never significantly worse), QMDP matches Ours (no
 value of information on these trees), and the gain comes from the start-state prior and the adjust action, not from
 failure types (ablations A1-A4). Drawer re-pulls (`reports/help_eval/drawer/`, observations refined by the drawer's
 travel bin): every method is within 0.4 reward of the clairvoyant and Ours ties B6 (−0.03); 67 test episodes, 30 of
 them the held-out medium drawer, are too few to separate methods there.
+
+**V1 (2026-11-23):** `scripts/embed_trees.py` embeds both cameras' frames at every tree node with frozen DINOv2
+ViT-S/14 (CLS + mean patch token, 224x392; `<trees>/dinov2_vits14.npz`, also on Drive). `ImageValueModel` is a 5-member
+bootstrap ensemble of one-hidden-layer MLPs on the embeddings' PCA plus arm joints, gripper and attempt history (no
+object identity, physical properties or pose), Platt-scaled; the PCA size (128) and weight penalty (30) were picked by
+calibration-fold likelihood. `ImageDifficultyHead` gives an image prior for Ours (ablation A5). Expert trees, test:
+- In distribution V1 ranks first decisions better than V0 (AUROC 0.85 vs 0.75 at k = 0) and is better calibrated after
+  a failure (ECE 0.037 vs 0.067 at k = 1), but neither meets ECE <= 0.05 at k = 0 (0.096, 0.081).
+- On held-out objects V1 transfers worse: orange AUROC 0.73 / 0.65 / 0.62 at k = 0 / 1 / 2 against V0's 0.74 / 0.69 /
+  0.75, and on the metal spoon (it never succeeds from the start) V1 is less sure of failure (Brier 0.047 vs 0.005 at k = 0).
+- As a decision rule, B6' (V1_k threshold) does no better than B6 (0.76 vs 1.00 at the default costs) and Ours beats it
+  in 7 of 15 cost settings with the CI excluding 0 (worse in one, c_help 1 / c_fail 2).
+- The image prior helps in distribution (difficulty NLL 0.81 vs 0.89) but not on the metal spoon (accuracy 0.55 vs
+  0.95), and A5 trails Ours by 0.25 [0.01, 0.50] at the default costs: the H3 pattern, the image prior transfers worse.
 
 ## 6. Metrics and outputs
 
