@@ -1,0 +1,79 @@
+{
+ "tomato": {
+  "long_m": 0.08,
+  "short_m": 0.08,
+  "height_m": 0.0562,
+  "mass_kg": 0.031,
+  "friction": 0.344
+ },
+ "egg": {
+  "long_m": 0.06,
+  "short_m": 0.0439,
+  "height_m": 0.0439,
+  "mass_kg": 0.037,
+  "friction": 0.4
+ },
+ "drumstick": {
+  "long_m": 0.0948,
+  "short_m": 0.0537,
+  "height_m": 0.071,
+  "mass_kg": 0.058,
+  "friction": 0.7
+ },
+ "wooden_ball": {
+  "long_m": 0.0496,
+  "short_m": 0.0496,
+  "height_m": 0.0496,
+  "mass_kg": 0.035,
+  "friction": 0.45
+ },
+ "banana": {
+  "long_m": 0.1023,
+  "short_m": 0.0488,
+  "height_m": 0.0333,
+  "mass_kg": 0.006,
+  "friction": 0.445
+ },
+ "waffle": {
+  "long_m": 0.1382,
+  "short_m": 0.1382,
+  "height_m": 0.0339,
+  "mass_kg": 0.021,
+  "friction": 0.625
+ },
+ "sponge": {
+  "long_m": 0.0815,
+  "short_m": 0.0681,
+  "height_m": 0.0403,
+  "mass_kg": 0.006,
+  "friction": 0.727
+ },
+ "duster": {
+  "long_m": 0.1261,
+  "short_m": 0.05,
+  "height_m": 0.0277,
+  "mass_kg": 0.009,
+  "friction": 0.44
+ },
+ "tape": {
+  "long_m": 0.128,
+  "short_m": 0.128,
+  "height_m": 0.048,
+  "mass_kg": 0.5,
+  "friction": 0.8
+ },
+ "orange": {
+  "long_m": 0.0497,
+  "short_m": 0.0497,
+  "height_m": 0.0459,
+  "mass_kg": 0.006,
+  "friction": 0.7
+ },
+ "metal_spoon": {
+  "long_m": 0.2103,
+  "short_m": 0.0418,
+  "height_m": 0.0144,
+  "mass_kg": 0.061,
+  "friction": 0.306
+ }
+}
