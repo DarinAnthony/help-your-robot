@@ -3,6 +3,8 @@
     source env.sh
     $PY scripts/help_eval.py --trees data/shelf_pnp/20261114_tree --family expert --out reports/help_eval/expert
     $PY scripts/help_eval.py --trees data/shelf_pnp/pi05_trees/run1 --family pi05 --out reports/help_eval/pi05
+    $PY scripts/help_eval.py --trees $MLSPACES_ARTIFACT_ROOT/collect/datagen/open_planner_v1 --family drawer \
+        --out reports/help_eval/drawer
 
 Folds: training objects' starts 60/15/25 train/cal/test by (object, seed); held-out objects test only. Models are fit on
 train; Platt scaling and every threshold or k are tuned on cal, separately for each cost setting; everything is scored
@@ -26,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from helpsim.help import policies as P  # noqa: E402
 from helpsim.help.models import calibration_metrics  # noqa: E402
 from helpsim.help.trees import (DIFFICULTIES, FAMILIES, Costs, assign_folds, best_value, decision_points,  # noqa: E402
-                                default_success, load_trees, rollout)
+                                default_success, load_drawer_trees, load_trees, rollout)
 
 C_HELP = (1, 2, 3, 5, 8)
 C_FAIL = (0.5, 1, 2)
@@ -36,7 +38,7 @@ B = 10_000
 
 
 def group(t) -> str:
-    return t.object if t.split != "train" else t.condition
+    return t.object if t.split != "train" else t.condition     # drawer: the object is the condition
 
 
 def score(trees, policy, c, reps: int = 1) -> list[dict]:
@@ -118,7 +120,7 @@ def evaluate(trees, family, rng, costs_grid) -> dict:
     spec = FAMILIES[family]
     V = P.ValueModel().fit(train, cal)
     head = P.DifficultyHead().fit(train)
-    obs = P.ObservationModel(spec).fit(train)
+    obs = P.ObservationModel(spec, travel_bins=P.DRAWER_TRAVEL_BINS if family == "drawer" else None).fit(train)
     obs_coarse = P.ObservationModel(spec, coarse=True).fit(train)
     onehot = lambda t: np.eye(3)[DIFFICULTIES.index(t.difficulty)]
     res = {"folds": {f: len([t for t in trees if t.fold == f]) for f in ("train", "cal", "test")},
@@ -321,7 +323,7 @@ def main() -> None:
     p.add_argument("--quick", action="store_true", help="only the default costs")
     p.add_argument("--seed", type=int, default=0)
     a = p.parse_args()
-    trees = load_trees(a.trees, a.family)
+    trees = load_drawer_trees(a.trees) if a.family == "drawer" else load_trees(a.trees, a.family)
     assign_folds(trees, seed=a.seed)
     print(f"{len(trees)} trees; folds", {f: sum(t.fold == f for t in trees) for f in ("train", "cal", "test")}, flush=True)
     grid = ((DEFAULT[0],), (DEFAULT[1],)) if a.quick else (C_HELP, C_FAIL)

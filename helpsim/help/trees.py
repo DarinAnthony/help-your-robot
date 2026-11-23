@@ -8,6 +8,9 @@ A tree is one start state with every action sequence played out to ``MAX_ATTEMPT
   outcomes success, off_shelf and place_miss.
 - ``pi05``: pi0.5's shelf trees (``scripts/pi05_rollouts.py trees``), actions C (continue) and R (reset and retry), only
   C from the start; terminal outcomes success and off_shelf.
+- ``drawer``: the TidyBot's logged re-pull runs (``tidybot_open_rp_*``, ``scripts/drawer_attempts.py``): one path of
+  up to 3 pulls (action P) per episode, outcomes success / stuck / short. An episode the planner ended before its third
+  pull (it refused to re-plan, e.g. after a weak grip's slip) has no further child: the robot must ask there.
 
 A help policy sees only the decision view (``view``): the start, the path so far, each past attempt's outcome and
 failure phase, and the state at the current node. ``rollout`` scores it exactly on a tree, since every child it can
@@ -19,6 +22,7 @@ failure, forces an ask.
 from __future__ import annotations
 
 import json
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -32,6 +36,8 @@ FAMILIES = {
                "phases": ("approach", "grasp", "carry")},
     "pi05": {"actions": ("C", "R"), "root_actions": ("C",), "terminal_fail": ("off_shelf",),
              "outcomes": ("success", "grasp_miss", "slip", "place_miss", "off_shelf", "timeout"), "phases": ()},
+    "drawer": {"actions": ("P",), "root_actions": ("P",), "terminal_fail": (),
+               "outcomes": ("success", "stuck", "short"), "phases": ()},
 }
 DIFFICULTIES = ("easy", "recoverable", "infeasible")
 OBJECT_FEATURES = json.loads((Path(__file__).with_name("object_features.json")).read_text())
@@ -94,6 +100,31 @@ def load_trees(root: Path, family: str) -> list[Tree]:
     return out
 
 
+DRAWER_HELD_OUT = ("medium",)
+
+
+def load_drawer_trees(root: Path) -> list[Tree]:
+    """The re-pull runs' ``attempts.jsonl`` under ``root`` (xemb's ``open_planner_v1``). A tree's object is its drawer
+    condition (folds are stratified by it); ``medium`` is held out (test only)."""
+    out = []
+    for f in sorted(Path(root).glob("tidybot_open_rp_*/attempts.jsonl")):
+        for i, line in enumerate(f.read_text().splitlines()):
+            if not line:
+                continue
+            r = json.loads(line)
+            cond = r.get("variant") or ("transient_stop" if "transient" in r["run"] else
+                                        "weak_grip" if "weak_grip" in r["run"] else "nominal")
+            nodes = {"": {"path": "", "outcome": None, "fail_phase": None, "state": {}}}
+            for a in r["attempts"][:MAX_ATTEMPTS]:
+                path = "P" * (a["attempt"] + 1)
+                nodes[path] = {"path": path, "outcome": a["outcome"], "fail_phase": None,
+                               "state": {k: a[k] for k in ("drawer_max_m", "drawer_end_m", "base_travel_m")}}
+            seed = zlib.crc32(f'{r["run"]}/{r["file"]}/{r["traj"]}'.encode())     # stable across processes
+            out.append(Tree("drawer", cond, cond, "heldout" if cond in DRAWER_HELD_OUT else "train", seed,
+                            np.zeros(3), np.zeros(3), nodes))
+    return out
+
+
 def assign_folds(trees: list[Tree], fractions=(0.60, 0.15, 0.25), seed: int = 0) -> None:
     """Training objects' starts split 60/15/25 into train/cal/test by (object, seed), so a start shared across
     conditions lands in the same fold; held-out objects are test only."""
@@ -145,6 +176,9 @@ def rollout(tree: Tree, policy, c: Costs) -> dict:
         if len(path) >= MAX_ATTEMPTS:
             return {"reward": reward - c.c_help, "success": False, "asked": True, "voluntary": False, "fails": fails,
                     "off_shelf": False, "path": path}
+        if not tree.actions(path):      # nothing was played out from here (a logged episode that stopped): ask
+            return {"reward": reward - c.c_help, "success": False, "asked": True, "voluntary": False, "fails": fails,
+                    "off_shelf": False, "path": path}
         a = policy(view(tree, path))
         if a == "ask":
             return {"reward": reward - c.c_help, "success": False, "asked": True, "voluntary": True, "fails": fails,
@@ -176,6 +210,8 @@ def best_value(tree: Tree, c: Costs, path: str = "") -> float:
 def default_action(v: dict) -> str:
     """The family's default continuation: the expert attempts, then adjusts; pi0.5 continues, then resets."""
     acts = v["actions"]
+    if not acts:
+        return "ask"
     return acts[0] if v["k"] == 0 or len(acts) == 1 else acts[1]
 
 
@@ -183,6 +219,8 @@ def default_success(tree: Tree, path: str) -> bool:
     """Whether the default continuation from ``path`` (never asking) ends in success: the value function's label."""
     while len(path) < MAX_ATTEMPTS:
         a = default_action(view(tree, path))
+        if a == "ask":
+            return False
         path += a
         o = tree.nodes[path]["outcome"]
         if o == "success":
@@ -237,7 +275,26 @@ def history_features(v: dict) -> np.ndarray:
     return np.concatenate([k, last, counts, phase, dyn])
 
 
+def drawer_features(v: dict) -> np.ndarray:
+    """Drawer: the decision index, previous outcomes and the last pull's drawer and base travel (every start is the
+    same drawer from the same pose, so there is nothing static to see)."""
+    spec = v["tree"].spec
+    fails = [o for o in spec["outcomes"] if o != "success"]
+    k = np.eye(MAX_ATTEMPTS)[v["k"]]
+    last, counts = np.zeros(len(fails)), np.zeros(len(fails))
+    for o, _ in v["history"]:
+        if o in fails:
+            counts[fails.index(o)] += 1
+    if v["history"] and v["history"][-1][0] in fails:
+        last[fails.index(v["history"][-1][0])] = 1
+    st = v["state"]
+    travel = np.array([st.get("drawer_max_m", 0.0) * 10, st.get("drawer_end_m", 0.0) * 10, st.get("base_travel_m", 0.0) * 10])
+    return np.concatenate([k, last, counts, travel])
+
+
 def features(v: dict) -> np.ndarray:
+    if v["tree"].family == "drawer":
+        return drawer_features(v)
     return np.concatenate([static_features(v["tree"]), history_features(v)])
 
 

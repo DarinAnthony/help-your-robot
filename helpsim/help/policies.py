@@ -57,29 +57,46 @@ class DifficultyHead:
         self.l2 = l2
 
     def fit(self, train: list[Tree]) -> "DifficultyHead":
-        X = np.array([static_features(t) for t in train])
+        X = np.array([static_features(t) if t.family != "drawer" else np.zeros(1) for t in train])
         y = np.array([DIFFICULTIES.index(t.difficulty) for t in train])
         self.lr = Logistic(self.l2).fit(X, y, len(DIFFICULTIES))
         self.freq = np.bincount(y, minlength=len(DIFFICULTIES)) / len(y)
         return self
 
     def __call__(self, tree: Tree) -> np.ndarray:
+        if tree.family == "drawer":         # identical starts: the prior is the training mix
+            return self.freq
         return self.lr.predict_proba(static_features(tree)[None])[0]
 
 
-class ObservationModel:
-    """P(o | d, a, k) with additive smoothing. ``coarse`` keeps only success / failure / terminal failure types."""
+# The drawer's failed pulls, by how far the drawer moved (drawer_max_m): locked ~8 mm, stuck 19-20 mm, a failed hard
+# pull ~34 mm, "short" >= 5 cm (EXPERIMENT_PLAN.md §3). The outcome categories alone lump the first three together.
+DRAWER_TRAVEL_BINS = (0.012, 0.026, 0.05)
 
-    def __init__(self, family_spec: dict, coarse: bool = False, alpha: float = 0.5):
-        self.spec, self.coarse, self.alpha = family_spec, coarse, alpha
+
+class ObservationModel:
+    """P(o | d, a, k) with additive smoothing over observation symbols. A symbol is the attempt's outcome, refined for
+    the drawer by its travel bin (``travel_bins``); ``coarse`` keeps only success / failure / terminal failure types."""
+
+    def __init__(self, family_spec: dict, coarse: bool = False, alpha: float = 0.5, travel_bins: tuple | None = None):
+        self.spec, self.coarse, self.alpha, self.bins = family_spec, coarse, alpha, travel_bins
         tf = family_spec["terminal_fail"]
-        self.outcomes = (("success", "fail") + tuple(tf)) if coarse else family_spec["outcomes"]
+        if coarse:
+            self.outcomes = ("success", "fail") + tuple(tf)
+        elif travel_bins:
+            self.outcomes = ("success",) + tuple(f"travel{i}" for i in range(len(travel_bins) + 1))
+        else:
+            self.outcomes = family_spec["outcomes"]
         self.terminal_fail = tf
 
-    def obs(self, outcome: str) -> str:
-        if not self.coarse or outcome == "success" or outcome in self.terminal_fail:
+    def obs(self, outcome: str, state: dict | None = None) -> str:
+        if outcome == "success" or outcome in self.terminal_fail:
             return outcome
-        return "fail"
+        if self.coarse:
+            return "fail"
+        if self.bins:
+            return f"travel{int(np.searchsorted(self.bins, (state or {}).get('drawer_max_m', 0.0)))}"
+        return outcome
 
     def fit(self, train: list[Tree]) -> "ObservationModel":
         acts = sorted(set(self.spec["actions"]) | set(self.spec["root_actions"]))
@@ -93,7 +110,7 @@ class ObservationModel:
                 parent, a, k = path[:-1], path[-1], len(path) - 1
                 if t.terminal(t.nodes[parent]["outcome"]):
                     continue
-                n[d, k, acts.index(a), self.outcomes.index(self.obs(node["outcome"]))] += 1
+                n[d, k, acts.index(a), self.outcomes.index(self.obs(node["outcome"], node["state"]))] += 1
         self.p = n / n.sum(-1, keepdims=True)
         return self
 
@@ -114,7 +131,8 @@ class BeliefPlanner:
         b = np.asarray(self.prior(v["tree"]), float).copy()
         for i, (o, _ph) in enumerate(v["history"]):
             a = v["path"][i]
-            b *= np.array([self.obs(d, i, a)[self.obs.outcomes.index(self.obs.obs(o))] for d in range(len(b))])
+            sym = self.obs.obs(o, v["tree"].nodes[v["path"][:i + 1]]["state"])
+            b *= np.array([self.obs(d, i, a)[self.obs.outcomes.index(sym)] for d in range(len(b))])
             b /= b.sum()
         return b
 
@@ -123,7 +141,7 @@ class BeliefPlanner:
         return tuple(a for a in acts if self.allowed is None or a in self.allowed)
 
     def _step(self, o: str) -> tuple[float, bool]:
-        if o == "fail":
+        if o == "fail" or o.startswith("travel"):     # a non-terminal failure symbol
             return -self.c.c_fail, False
         return outcome_reward(o, self.c, self.obs.terminal_fail)
 

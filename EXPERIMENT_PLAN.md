@@ -155,7 +155,9 @@ the V1 image ensemble) and `scripts/help_eval.py`, which writes `reports/help_ev
 scores pi0.5's continue/reset trees (`--family pi05`). First run on the expert trees (`reports/help_eval/expert/`):
 Ours beats B6 at low c_fail (CI excludes 0 in 6 of 15 cost settings; never significantly worse), QMDP matches Ours (no
 value of information on these trees), and the gain comes from the start-state prior and the adjust action, not from
-failure types (ablations A1-A4).
+failure types (ablations A1-A4). Drawer re-pulls (`reports/help_eval/drawer/`, observations refined by the drawer's
+travel bin): every method is within 0.4 reward of the clairvoyant and Ours ties B6 (−0.03); 67 test episodes, 30 of
+them the held-out medium drawer, are too few to separate methods there.
 
 ## 6. Metrics and outputs
 
