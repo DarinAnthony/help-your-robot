@@ -19,6 +19,10 @@ The research plan is [`PLAN.md`](PLAN.md) and the experiment (hypotheses, evalua
 | `scripts/drawer_attempts.py` | Per-pull attempt records of drawer runs from the H5 measured streams (`<run>/attempts.jsonl`) |
 | `scripts/tree_summary.py` | Outcome-defined difficulty of every shelf tree start (`<tree root>/difficulty.jsonl`) |
 | `scripts/contact_sheet.py` | Frames across time from episode videos as one PNG, for a quick look |
+| `scripts/to_lerobot.py`, `helpsim/openpi_help.py`, `scripts/openpi_run.py`, `notebooks/pi05_train_colab.ipynb` | pi0.5: LeRobot datasets (train and 5% `_val`), the openpi LoRA configs, norm stats / training / open-loop check / policy server, and the Colab notebook (TASK_SPEC.md §7) |
+| `helpsim/pi05_shelf.py`, `scripts/pi05_rollouts.py` | pi0.5 in the shelf sim against the policy server: attempt monitor (TASK_SPEC.md §4), reset and retry, help decisions, continue/reset trees; `replay-test` checks the monitor on expert episodes |
+| `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` | pi0.5 in the drawer sim: xemb's collection pipeline with a pi0.5 TidyBot policy in place of the planner |
+| `helpsim/help/`, `scripts/help_eval.py` | The help study: exact scoring on trees, value functions, baselines, belief POMDP; reports in `reports/help_eval/<family>/` |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |
 | `data/` | Generated outputs (git-ignored) |
 
