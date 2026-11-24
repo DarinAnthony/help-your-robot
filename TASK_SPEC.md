@@ -91,12 +91,29 @@ the object during the lift, before it is 3 cm up, reads as a grasp miss, as the 
 "unreachable" (an IK failure) has no pi0.5 counterpart. Replays are not bit-exact (the expert's IK touched the sim
 state), so a rolling object can end differently from the recording.
 
+Drawer: `helpsim/pi05_drawer.py` (`DrawerMonitor`, checked before every ~15 Hz policy step inside xemb's pipeline).
+A hold is both finger pads on the drawer (its body and the handle below it) with the gripper commanded closed. A grasp
+miss is 2.5 s closed without a hold (the expert's grasp takes 1.2 s from the close command to contact), a lost hold is
+the pads off the drawer for 0.3 s after one (single-step contact gaps occur during a good pull), and a stall is under
+5 mm of drawer travel over the last 2 s of a hold (the nominal replay's longest still stretch while holding is 0.6 s).
+Each attempt's record keeps the help study's categories (`success`, `stuck` under 5 cm of travel, `short`) with the
+monitor's `event`, and goes into the trajectory's `obs_scene`; `scripts/drawer_attempts.py <run>` writes the run's
+`attempts.jsonl`, which `helpsim/help/trees.py` reads (`load_drawer_trees(root, "pi05_drawer_*")`,
+`scripts/help_eval.py --family drawer --drawer-runs`). Checked with a recorded nominal success replayed through it
+(one attempt, success, 22.6 cm), the same replay on the locked drawer (three holds lost at its 8 mm stop, with resets
+between), the stand-in server on the stuck drawer (three 25 s timeouts, resets between), and continue mode.
+
 ## 5. The help decision
 
 - **When:** before each attempt k = 1, 2, 3: at the start, and after each failed attempt.
 - **Actions:**
   - **continue:** pi0.5 resumes from the current state;
   - **reset and retry:** arm to home, gripper open (and the base back to its start, on the drawer), then pi0.5;
+    on the drawer, through xemb's measured command path, the jaws open, the base backs 15 cm off the handle, the arm
+    goes to its start pose, the base drives back and is steered onto its start (within 5 mm, the TCP within 1 cm of
+    its start in the base frame; ~10 s). The arm tracks TCP poses there, so the redundant xArm7's joints drift in its
+    null space (0.3–0.5 rad from the start joints, even while holding still) and the reset matches the hand, not the
+    joints;
   - **ask:** the episode ends in success (oracle help).
 - **Reward:**
   - +10 for autonomous success;
@@ -144,7 +161,8 @@ base deltas within each chunk with the gripper absolute, pi0.5 LoRA from `pi05_b
 | Colab notebook | `notebooks/pi05_train_colab.ipynb` |
 | pi0.5 in the shelf sim (closed loop, attempt monitor, reset, decisions, trees, pi0.5's spread) | `helpsim/pi05_shelf.py` |
 | Episodes and trees against the policy server; the replay test | `scripts/pi05_rollouts.py` |
-| pi0.5 in the drawer sim: xemb's collection pipeline with `Pi05TidybotPolicy` in place of the planner | `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` |
+| pi0.5 in the drawer sim: xemb's collection pipeline with `Pi05TidybotPolicy` in place of the planner (attempt monitor, reset, continue/reset decisions, at most 3 attempts) | `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` |
+| Drawer attempt records (`attempts.jsonl`) from the planner's re-pull runs or pi0.5's runs | `scripts/drawer_attempts.py` |
 | Help-policy evaluation on trees (value functions, baselines, belief POMDP) | `helpsim/help/`, `scripts/help_eval.py` |
 | Frozen DINOv2 embeddings of tree frames (for V1) | `scripts/embed_trees.py` |
 

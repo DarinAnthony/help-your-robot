@@ -368,9 +368,11 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--quick", action="store_true", help="only the default costs")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--drawer-runs", default="tidybot_open_rp_*",
+                   help="drawer family: run-name glob under --trees (pi0.5's runs: e.g. 'pi05_drawer_*')")
     p.add_argument("--no-images", action="store_true", help="skip V1 even if <trees>/dinov2_vits14.npz exists")
     a = p.parse_args()
-    trees = load_drawer_trees(a.trees) if a.family == "drawer" else load_trees(a.trees, a.family)
+    trees = load_drawer_trees(a.trees, a.drawer_runs) if a.family == "drawer" else load_trees(a.trees, a.family)
     assign_folds(trees, seed=a.seed)
     print(f"{len(trees)} trees; folds", {f: sum(t.fold == f for t in trees) for f in ("train", "cal", "test")}, flush=True)
     grid = ((DEFAULT[0],), (DEFAULT[1],)) if a.quick else (C_HELP, C_FAIL)

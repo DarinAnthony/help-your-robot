@@ -16,12 +16,12 @@ The research plan is [`PLAN.md`](PLAN.md) and the experiment (hypotheses, evalua
 | `scripts/run_pipeline_hooked.py`, `helpsim/xemb_hooks.py` | xemb's `run_pipeline.py` with help!'s hooks: the variant's drawer values, the TidyBot's own cameras for the preview videos |
 | `scripts/export_drawer_sessions.sh` | Drawer episodes as hub sessions through the TidyBot's calibrated cameras (xemb's `session_export`) |
 | `scripts/collect_shelf_pnp.py`, `helpsim/tasks/shelf_pnp.py` | The DROID shelf pick and place: rendered episodes, fault modes, and counterfactual action trees (`--tree`) |
-| `scripts/drawer_attempts.py` | Per-pull attempt records of drawer runs from the H5 measured streams (`<run>/attempts.jsonl`) |
+| `scripts/drawer_attempts.py` | Per-pull attempt records of drawer runs (`<run>/attempts.jsonl`): the planner's from the H5 measured streams, pi0.5's from its attempt monitor |
 | `scripts/tree_summary.py` | Outcome-defined difficulty of every shelf tree start (`<tree root>/difficulty.jsonl`) |
 | `scripts/contact_sheet.py` | Frames across time from episode videos as one PNG, for a quick look |
 | `scripts/to_lerobot.py`, `helpsim/openpi_help.py`, `scripts/openpi_run.py`, `notebooks/pi05_train_colab.ipynb` | pi0.5: LeRobot datasets (train and 5% `_val`), the openpi LoRA configs, norm stats / training / open-loop check / policy server, and the Colab notebook (TASK_SPEC.md §7) |
 | `helpsim/pi05_shelf.py`, `scripts/pi05_rollouts.py` | pi0.5 in the shelf sim against the policy server: attempt monitor (TASK_SPEC.md §4), reset and retry, help decisions, continue/reset trees; `replay-test` checks the monitor on expert episodes |
-| `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` | pi0.5 in the drawer sim: xemb's collection pipeline with a pi0.5 TidyBot policy in place of the planner |
+| `helpsim/pi05_drawer.py`, `scripts/run_drawer_pi05.sh` | pi0.5 in the drawer sim: xemb's collection pipeline with a pi0.5 TidyBot policy in place of the planner; attempt monitor, reset and continue/reset decisions (up to 3 attempts per episode) |
 | `helpsim/help/`, `scripts/help_eval.py` | The help study: exact scoring on trees, value functions, baselines, belief POMDP; reports in `reports/help_eval/<family>/` |
 | `scripts/embed_trees.py` | DINOv2 ViT-S/14 embeddings of every tree node's frames, for the V1 image value function |
 | `pi05/` | π0.5 training code copied from xemb-vla (see [`pi05/PROVENANCE.md`](pi05/PROVENANCE.md)) |

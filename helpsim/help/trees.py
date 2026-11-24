@@ -104,11 +104,12 @@ def load_trees(root: Path, family: str) -> list[Tree]:
 DRAWER_HELD_OUT = ("medium",)
 
 
-def load_drawer_trees(root: Path) -> list[Tree]:
-    """The re-pull runs' ``attempts.jsonl`` under ``root`` (xemb's ``open_planner_v1``). A tree's object is its drawer
-    condition (folds are stratified by it); ``medium`` is held out (test only)."""
+def load_drawer_trees(root: Path, runs: str = "tidybot_open_rp_*") -> list[Tree]:
+    """The ``attempts.jsonl`` of the runs matching ``runs`` under ``root`` (xemb's ``open_planner_v1``): the planner's
+    re-pull runs, or pi0.5's (``scripts/run_drawer_pi05.sh``, one decision rule per run, so one path per episode). A
+    tree's object is its drawer condition (folds are stratified by it); ``medium`` is held out (test only)."""
     out = []
-    for f in sorted(Path(root).glob("tidybot_open_rp_*/attempts.jsonl")):
+    for f in sorted(Path(root).glob(f"{runs}/attempts.jsonl")):
         for i, line in enumerate(f.read_text().splitlines()):
             if not line:
                 continue
@@ -119,7 +120,8 @@ def load_drawer_trees(root: Path) -> list[Tree]:
             for a in r["attempts"][:MAX_ATTEMPTS]:
                 path = "P" * (a["attempt"] + 1)
                 nodes[path] = {"path": path, "outcome": a["outcome"], "fail_phase": None,
-                               "state": {k: a[k] for k in ("drawer_max_m", "drawer_end_m", "base_travel_m")}}
+                               "state": {**{k: a[k] for k in ("drawer_max_m", "drawer_end_m", "base_travel_m")},
+                                         "event": a.get("event")}}      # pi0.5 runs: the monitor's event
             seed = zlib.crc32(f'{r["run"]}/{r["file"]}/{r["traj"]}'.encode())     # stable across processes
             out.append(Tree("drawer", cond, cond, "heldout" if cond in DRAWER_HELD_OUT else "train", seed,
                             np.zeros(3), np.zeros(3), nodes))

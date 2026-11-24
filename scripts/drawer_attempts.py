@@ -7,6 +7,11 @@ for it this records the drawer's travel (max and at the pull's end), the base's 
 episode a success during it, and its steps. A pull's ``outcome`` is ``success`` or ``stuck`` (the drawer travelled less
 than 5 cm) or ``short`` (it moved but did not open).
 
+pi0.5 runs (``scripts/run_drawer_pi05.sh``) have no retry count: their attempts are the policy's own monitor's
+(``helpsim/pi05_drawer.py``), saved in each trajectory's ``obs_scene`` as ``help_attempts`` (the same fields, plus the
+monitor's ``event``: success, grasp_miss, hold_lost, stall, timeout or truncated) and ``help_decisions``; those are
+used as recorded.
+
     source env.sh && $PY scripts/drawer_attempts.py tidybot_open_hidden_hard_20261114 [more runs ...]
 
 writes ``<run>/attempts.jsonl`` (one line per episode) and prints a per-run summary.
@@ -28,7 +33,21 @@ BASE = ("robot_0/joint_x", "robot_0/joint_y")
 STUCK_M = 0.05
 
 
+def pi05_episode(traj) -> dict | None:
+    if "obs_scene" not in traj:
+        return None
+    scene = json.loads(bytes(traj["obs_scene"][()]).decode())
+    if "help_attempts" not in scene:
+        return None
+    attempts = scene["help_attempts"]
+    return {"success": any(a["outcome"] == "success" for a in attempts), "n_steps": int(len(traj["success"])),
+            "attempts": attempts, "decisions": scene.get("help_decisions", []), "decide": scene.get("help_decide")}
+
+
 def episode(traj) -> dict:
+    pi05 = pi05_episode(traj)
+    if pi05 is not None:
+        return pi05
     from molmo_spaces.robots.measured.stream_recorder import decode
 
     retries = traj["obs/extra/policy_num_retries"][:]

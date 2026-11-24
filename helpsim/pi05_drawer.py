@@ -15,6 +15,24 @@ camera by ``helpsim/xemb_hooks.py``) and ``wrist_camera`` resized to 180x320; st
 (x, y, yaw) in the episode's first base frame; action = 7 arm joint targets, gripper command / 255, base target in the
 same frame. The observation at step k gets the command for step k+1, and each chunk's first ``$HELP_PI05_EXEC``
 (default 8) commands are executed, one per policy step (~15 Hz).
+
+**Attempts** (TASK_SPEC.md §4), from sim state before every policy step (``DrawerMonitor``):
+
+- ``success``: the task's ``judge_success`` (drawer open);
+- ``grasp_miss``: the gripper commanded closed for 2.5 s without both finger pads on the drawer (the expert takes
+  1.2 s from the close command to contact);
+- ``hold_lost``: after a hold (both pads on the drawer, gripper closed), the pads off it for 0.3 s, slipped or let go;
+- ``stall``: drawer travel under 5 mm over the last 2 s of a hold;
+- ``timeout``: none of these within 25 s (``truncated``: the task's step limit ended the episode first).
+
+**Decisions** (§5) come at the start and after each failed attempt, at most ``$HELP_PI05_ATTEMPTS`` (default 3)
+attempts: ``$HELP_PI05_DECIDE`` = ``reset`` (default: the jaws open, the base backs off the handle, the hand returns to
+its start pose and the base to its start, then pi0.5 again; RESET_* below) or ``continue`` (pi0.5 goes on from where
+it is). The episode ends (the policy returns None) at a success or after the last attempt. Each attempt's
+record (outcome, the drawer's and the base's travel, its policy steps) and each decision point (state, and pi0.5's
+spread over ``$HELP_PI05_SAMPLES`` sampled chunks if set) go into the trajectory's ``obs_scene`` as ``help_attempts``
+and ``help_decisions``; ``scripts/drawer_attempts.py`` writes them to the run's ``attempts.jsonl`` for
+``helpsim/help/trees.py``.
 """
 
 from __future__ import annotations
@@ -26,6 +44,29 @@ import time
 import numpy as np
 
 H, W = 180, 320
+DRAWER = "drawer/glass_counter__stack_b_3_front"
+PADS = ("robot_0/arm/left_finger_pad_1", "robot_0/arm/left_finger_pad_2", "robot_0/arm/right_finger_pad_1",
+        "robot_0/arm/right_finger_pad_2")
+ATTEMPT_S = 25.0
+GRASP_S = 2.5                  # closed this long without a hold: a grasp miss (nominal: 1.2 s from close to contact)
+LOST_S = 0.3                   # pads off the drawer this long after a hold: the hold is lost
+STALL_S, STALL_M = 2.0, 0.005
+CLOSING = 0.5                  # gripper command (fraction of 255) that counts as closing
+# Reset, through xemb's measured command path (``molmo_spaces/controllers/measured.py``): the arm tracks a TCP pose (a
+# joint target goes through FK, the hub's 40 mm lead and the mode-7 tracker's IK), so the hand returns to its start
+# pose but the redundant 7-joint arm need not return to its start joints (they drift 0.3-0.5 rad in its null space,
+# even holding still; the planner's re-pull returns the same way); the arm is stopped while the base drives; the base
+# is the teleop's open-loop velocity (a moving target is a velocity, covering ~90% of each move; a held target stops
+# it). So: the jaws open with
+# arm and base held; the base backs 15 cm away from the handle; the arm goes to its start pose; the base drives back;
+# then, at most 5 s, the base is steered onto its start (RESET_GAIN times the error, within the teleop's caps) until it
+# is within 5 mm and 0.01 rad of it and the TCP within 1 cm of its start position in the base frame.
+RESET_OPEN_S, RESET_BACK_M, RESET_HOME_S, RESET_BASE_SPEED = 1.2, 0.15, 2.5, 0.05
+RESET_TOL_M, RESET_TOL_YAW, RESET_TOL_TCP_M, RESET_SETTLE_MAX_S = 0.005, 0.01, 0.01, 5.0
+RESET_GAIN, BASE_CAPS = 2.0, np.array([0.15, 0.15, 0.5])
+TCP_SITE = "robot_0/arm/link_tcp"
+DEBUG = bool(os.environ.get("HELP_PI05_DEBUG"))   # a line per policy step and per reset step
+STUCK_M = 0.05                 # scripts/drawer_attempts.py: a failed pull under 5 cm of travel is "stuck"
 
 
 def to_first_frame(pose: np.ndarray, base0: np.ndarray) -> np.ndarray:
@@ -51,6 +92,121 @@ def resize(img: np.ndarray) -> np.ndarray:
     from PIL import Image
 
     return np.asarray(Image.fromarray(np.asarray(img, np.uint8)).resize((W, H), Image.BILINEAR))
+
+
+class DrawerSim:
+    """The quantities the monitor reads from xemb's running sim."""
+
+    def __init__(self, task):
+        import mujoco
+
+        self.task = task
+        m = task.env.current_model
+        self.model = m
+        j = m.joint(f"{DRAWER}/slide")
+        self.slide = int(m.jnt_qposadr[j.id])
+        root = int(m.jnt_bodyid[j.id])
+        bodies = {root}
+        for b in range(m.nbody):      # the drawer body and everything below it (front, handle)
+            p = b
+            while p > 0 and p not in bodies:
+                p = int(m.body_parentid[p])
+            if p in bodies:
+                bodies.add(b)
+        self.drawer_geoms = {g for g in range(m.ngeom) if int(m.geom_bodyid[g]) in bodies}
+        ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, n) for n in PADS]
+        if min(ids) < 0:
+            raise RuntimeError(f"finger pad geoms not found: {dict(zip(PADS, ids))}")
+        self.left, self.right = set(ids[:2]), set(ids[2:])
+        self.base = [int(m.jnt_qposadr[m.joint(f"robot_0/joint_{a}").id]) for a in ("x", "y")]
+        self.yaw = int(m.jnt_qposadr[m.joint("robot_0/joint_th").id])
+        self.tcp = m.site(TCP_SITE).id
+
+    @property
+    def data(self):
+        return self.task.env.current_data
+
+    def drawer_m(self) -> float:
+        return float(self.data.qpos[self.slide])
+
+    def base_xy(self) -> np.ndarray:
+        return np.array([self.data.qpos[a] for a in self.base], float)
+
+    def tcp_in_base(self) -> np.ndarray:
+        """The TCP's position in the base's frame (x forward, y left, z up from the base's origin)."""
+        d = self.data
+        p = d.site_xpos[self.tcp] - np.r_[self.base_xy(), 0.0]
+        c, s = np.cos(d.qpos[self.yaw]), np.sin(d.qpos[self.yaw])
+        return np.array([c * p[0] + s * p[1], -s * p[0] + c * p[1], p[2]])
+
+    def pads_on_drawer(self) -> bool:
+        d, left, right = self.data, False, False
+        for c in d.contact[: d.ncon]:
+            g1, g2 = int(c.geom1), int(c.geom2)
+            for pad, other in ((g1, g2), (g2, g1)):
+                if other in self.drawer_geoms:
+                    left |= pad in self.left
+                    right |= pad in self.right
+        return left and right
+
+    def success(self) -> bool:
+        return bool(self.task.judge_success())
+
+
+class DrawerMonitor:
+    """Watches one attempt; ``update(grip_cmd)`` before every policy step returns the outcome once it has ended."""
+
+    def __init__(self, sim: DrawerSim, dt: float, step0: int):
+        self.sim, self.dt, self.step0 = sim, dt, step0
+        self.n = lambda s: max(1, round(s / dt))
+        self.steps = 0
+        self.close_steps = 0
+        self.held = sim.pads_on_drawer()      # a continue may start holding
+        self.hold = []                        # drawer travel over the current hold
+        self.off = 0
+        self.d0 = self.dmax = self.dmin = sim.drawer_m()
+        self.b0 = sim.base_xy()
+        self.bmin = self.bmax = self.b0.copy()
+
+    def update(self, cmd: float) -> str | None:
+        sim = self.sim
+        self.steps += 1
+        d = sim.drawer_m()
+        self.dmax, self.dmin = max(self.dmax, d), min(self.dmin, d)
+        b = sim.base_xy()
+        self.bmin, self.bmax = np.minimum(self.bmin, b), np.maximum(self.bmax, b)
+        if sim.success():
+            return "success"
+        closing, touching = cmd >= CLOSING, sim.pads_on_drawer()
+        if DEBUG:
+            print(f"[pi05_drawer] step {self.step0 + self.steps} cmd {cmd:.2f} pads {int(touching)} drawer {d:.4f}",
+                  flush=True)
+        self.close_steps = self.close_steps + 1 if closing else 0
+        if closing and touching:
+            self.held, self.off = True, 0
+            self.hold.append(d)
+            w = self.hold[-self.n(STALL_S):]
+            if len(self.hold) >= self.n(STALL_S) and max(w) - min(w) < STALL_M:
+                return "stall"
+        else:
+            self.hold = []
+            if self.held:
+                self.off += 1
+                if self.off >= self.n(LOST_S):
+                    return "hold_lost"
+            elif self.close_steps >= self.n(GRASP_S):
+                return "grasp_miss"
+        if self.steps >= self.n(ATTEMPT_S):
+            return "timeout"
+        return None
+
+    def record(self, k: int, outcome: str, step: int) -> dict:
+        travel = self.dmax
+        cat = "success" if outcome == "success" else ("stuck" if travel < STUCK_M else "short")
+        return {"attempt": k, "outcome": cat, "event": outcome, "drawer_max_m": round(travel, 4),
+                "drawer_end_m": round(self.sim.drawer_m(), 4), "drawer_start_m": round(self.d0, 4),
+                "base_travel_m": round(float(np.linalg.norm(self.bmax - self.bmin)), 4), "held": self.held,
+                "first_step": self.step0, "last_step": step, "steps": self.steps, "start": getattr(self, "start", None)}
 
 
 class ReplaySource:
@@ -113,15 +269,27 @@ def make_policy_class():
         def __init__(self, config, task=None):
             super().__init__(config, task)
             self.exec_steps = int(os.environ.get("HELP_PI05_EXEC", "8"))
+            self.max_attempts = int(os.environ.get("HELP_PI05_ATTEMPTS", "3"))
+            self.decide_mode = os.environ.get("HELP_PI05_DECIDE", "reset")
+            self.n_samples = int(os.environ.get("HELP_PI05_SAMPLES", "0"))
+            if self.decide_mode not in ("reset", "continue"):
+                raise SystemExit(f"HELP_PI05_DECIDE={self.decide_mode}: reset or continue")
+            self.dt = float(getattr(config, "policy_dt_ms", 66.0)) / 1000.0
             self.prompt = "open the drawer"
-            self.log = []
             self.reset()
 
         def reset(self):
             self.src = source()
-            self.base0, self.chunk, self.i, self.step = None, None, 0, 0
+            self.base0, self.chunk, self.i, self.step, self.src_step = None, None, 0, 0, 0
             self.infer_s, self.calls = 0.0, 0
+            self.sim = self.monitor = None
+            self.attempts, self.decisions, self.queue = [], [], []
+            self.last = None          # the last command sent: {"arm", "gripper", "base"}
+            self.settle_left = 0      # policy steps left to wait for the reset to arrive
+            self.settle_steps = self.reset_steps = 0
+            self.done = False
 
+        # ------------------------------------------------------------ pi0.5 I/O
         def model_input(self, o: dict) -> dict:
             q = o["qpos"]
             base = np.asarray(q["base"], float)
@@ -133,31 +301,160 @@ def make_policy_class():
                 inp["observation/wrist"] = resize(o["wrist_camera"])
             return inp
 
-        def get_action(self, observation):
-            o = observation[0] if isinstance(observation, (list, tuple)) else observation
-            if self.base0 is None:
-                self.base0 = np.asarray(o["qpos"]["base"], float).copy()
-                if isinstance(self.src, ReplaySource):     # the replayed episode must start where this one does
-                    d = max(np.abs(np.asarray(o["qpos"]["arm"]) - self.src.q0["arm"]).max(),
-                            np.abs(self.base0 - self.src.base0).max())
-                    print(f"[pi05_drawer] replay start differs from the recording by {d:.2e}", flush=True)
+        def to_command(self, a) -> dict:
+            return {"arm": np.asarray(a[:7], float), "gripper": np.array([float(np.clip(a[7] * 255.0, 0.0, 255.0))]),
+                    "base": to_world(a[8:11], self.base0)}
+
+        def pi05(self, o: dict) -> dict:
             if self.chunk is None or self.i >= self.exec_steps:
                 t = time.perf_counter()
-                self.chunk = np.asarray(self.src.infer(self.model_input(o), self.step)["actions"])
+                self.chunk = np.asarray(self.src.infer(self.model_input(o), self.src_step)["actions"])
                 self.infer_s += time.perf_counter() - t
                 self.calls += 1
                 self.i = 0
             a = self.chunk[self.i]
             self.i += 1
+            self.src_step += 1
+            return self.to_command(a)
+
+        def spread(self, o: dict) -> dict:
+            """pi0.5's uncertainty here: the spread of n sampled chunks from the same observation."""
+            inp = self.model_input(o)
+            c = np.stack([np.asarray(self.src.infer(inp, self.src_step)["actions"]) for _ in range(self.n_samples)])
+            e = self.exec_steps
+            return {"n": self.n_samples, "arm_std_exec": float(c[:, :e, :7].std(0).mean()),
+                    "arm_std_chunk": float(c[:, :, :7].std(0).mean()), "grip_std_exec": float(c[:, :e, 7].std(0).mean()),
+                    "base_std_exec": float(c[:, :e, 8:11].std(0).mean())}
+
+        # ------------------------------------------------------------ attempts and decisions
+        def decision_point(self, k: int, o: dict) -> str:
+            q = o["qpos"]
+            choice = "continue" if k == 0 else self.decide_mode     # the first attempt starts at the start pose
+            dp = {"attempt": k, "choice": choice, "step": self.step,
+                  "state": {"arm": np.round(np.asarray(q["arm"], float)[:7], 5).tolist(),
+                            "gripper": float(q["gripper"][0]),
+                            "base": np.round(to_first_frame(np.asarray(q["base"], float), self.base0)[0], 5).tolist(),
+                            "drawer_m": round(self.sim.drawer_m(), 5)}}
+            if self.n_samples and self.src.needs_images:
+                dp["spread"] = self.spread(o)
+            self.decisions.append(dp)
+            return choice
+
+        def start_attempt(self, k: int, o: dict) -> None:
+            if self.decision_point(k, o) == "reset":
+                self.queue = self.reset_commands(o)
+                if isinstance(self.src, ReplaySource):
+                    self.src_step = 0          # the recording starts again from the start pose
+            self.chunk = None                   # pi0.5 re-plans from the attempt's first observation
+            self.monitor = None                 # started when the reset (if any) has finished
+
+        def reset_commands(self, o: dict) -> list[dict]:
+            """Reset-and-retry (RESET_* above): open, base back, arm to its start pose, base to its start pose. The hold
+            until the robot has arrived follows in ``get_action``."""
+            arm = np.asarray(self.last["arm"] if self.last else o["qpos"]["arm"], float)[:7]
+            here = to_first_frame(np.asarray(o["qpos"]["base"], float), self.base0)[0]
+            back = np.array([min(here[0], -RESET_BACK_M), here[1], here[2]])
+            opened = np.array([0.0])
+            world = lambda p: to_world(p, self.base0)
+
+            def drive(arm_q, a, b):
+                m = max(1, int(np.ceil(np.linalg.norm(b[:2] - a[:2]) / (RESET_BASE_SPEED * self.dt))))
+                return [{"arm": arm_q, "gripper": opened, "base": world(a + (b - a) * i / m)} for i in range(1, m + 1)]
+
+            out = [{"arm": arm, "gripper": opened, "base": world(here)}] * self.n(RESET_OPEN_S)
+            out += drive(arm, here, back)
+            n = self.n(RESET_HOME_S)
+            out += [{"arm": arm + (self.arm0 - arm) * i / n, "gripper": opened, "base": world(back)}
+                    for i in range(1, n + 1)]
+            out += drive(self.arm0, back, np.zeros(3))
+            self.settle_left, self.settle_steps, self.reset_steps = self.n(RESET_SETTLE_MAX_S), 0, len(out)
+            self.vtarget = out[-1]["base"].copy()
+            return out
+
+        def base_error(self, o: dict) -> np.ndarray:
+            """The start pose minus the base's pose, world frame, yaw wrapped."""
+            e = self.base0 - np.asarray(o["qpos"]["base"], float)
+            e[2] = (e[2] + np.pi) % (2 * np.pi) - np.pi
+            return e
+
+        def settle(self, o: dict) -> dict | None:
+            """One step of the reset's final hold: steer the base onto its start; None once the robot has arrived."""
+            e = self.base_error(o)
+            base_ok = np.linalg.norm(e[:2]) < RESET_TOL_M and abs(e[2]) < RESET_TOL_YAW
+            if base_ok and np.linalg.norm(self.sim.tcp_in_base() - self.tcp0) < RESET_TOL_TCP_M:
+                return None
+            if not base_ok:      # the teleop reads the target's motion as the velocity
+                self.vtarget = self.vtarget + np.clip(RESET_GAIN * e, -BASE_CAPS, BASE_CAPS) * self.dt
+            return {"arm": self.arm0, "gripper": np.array([0.0]), "base": self.vtarget.copy()}
+
+        def n(self, s: float) -> int:
+            return max(1, round(s / self.dt))
+
+        def get_action(self, observation):
+            o = observation[0] if isinstance(observation, (list, tuple)) else observation
+            if self.done:
+                return None
+            if self.base0 is None:
+                self.base0 = np.asarray(o["qpos"]["base"], float).copy()
+                self.arm0 = np.asarray(o["qpos"]["arm"], float)[:7].copy()
+                self.sim = DrawerSim(self.task)
+                self.tcp0 = self.sim.tcp_in_base()
+                if isinstance(self.src, ReplaySource):     # the replayed episode must start where this one does
+                    d = max(np.abs(np.asarray(o["qpos"]["arm"]) - self.src.q0["arm"]).max(),
+                            np.abs(self.base0 - self.src.base0).max())
+                    print(f"[pi05_drawer] replay start differs from the recording by {d:.2e}", flush=True)
+                self.start_attempt(0, o)
+            if self.monitor is not None:
+                out = self.monitor.update(float(self.last["gripper"][0]) / 255.0 if self.last else 0.0)
+                if out:
+                    k = len(self.attempts)
+                    self.attempts.append(self.monitor.record(k, out, self.step))
+                    print(f"[pi05_drawer] attempt {k + 1}: {out} (drawer max {self.monitor.dmax * 100:.1f} cm, "
+                          f"{self.monitor.steps} steps)", flush=True)
+                    if out == "success" or k + 1 >= self.max_attempts:
+                        self.done = True
+                        return None
+                    self.start_attempt(k + 1, o)
+            if self.queue:
+                cmd = self.queue.pop(0)
+                if DEBUG:
+                    q = o["qpos"]
+                    print(f"[pi05_drawer] reset {len(self.queue)} left: arm err "
+                          f"{np.abs(np.asarray(q['arm'], float)[:7] - np.asarray(cmd['arm'])).max():.3f} to home "
+                          f"{np.abs(np.asarray(q['arm'], float)[:7] - self.arm0).max():.3f} base "
+                          f"{np.round(to_first_frame(np.asarray(q['base'], float), self.base0)[0], 4).tolist()} cmd "
+                          f"{np.round(to_first_frame(cmd['base'], self.base0)[0], 4).tolist()} drawer {self.sim.drawer_m():.4f}",
+                          flush=True)
+            elif self.settle_left > 0 and (cmd := self.settle(o)) is not None:
+                self.settle_left -= 1
+                self.settle_steps += 1
+                if DEBUG and self.settle_left % 15 == 0:
+                    print(f"[pi05_drawer] settling: base error {np.round(self.base_error(o), 4).tolist()} tcp error "
+                          f"{np.linalg.norm(self.sim.tcp_in_base() - self.tcp0):.4f} m", flush=True)
+            else:
+                self.settle_left = 0
+                if self.monitor is None:
+                    self.monitor = DrawerMonitor(self.sim, self.dt, self.step)
+                    self.monitor.start = {     # where the attempt starts, relative to the episode's start
+                        "base": np.round(to_first_frame(np.asarray(o["qpos"]["base"], float), self.base0)[0], 4).tolist(),
+                        "arm_max_diff": round(float(np.abs(np.asarray(o["qpos"]["arm"], float)[:7] - self.arm0).max()), 4),
+                        "tcp_err_m": round(float(np.linalg.norm(self.sim.tcp_in_base() - self.tcp0)), 4),
+                        "reset_steps": self.reset_steps, "settle_steps": self.settle_steps}
+                cmd = self.pi05(o)
+            self.last = cmd
             self.step += 1
-            return {"arm": np.asarray(a[:7], float), "gripper": np.array([float(np.clip(a[7] * 255.0, 0.0, 255.0))]),
-                    "base": to_world(a[8:11], self.base0)}
+            return {k: np.asarray(v, float).copy() for k, v in cmd.items()}
 
         def get_info(self) -> dict:
+            attempts = list(self.attempts)
+            if self.monitor is not None and not self.done:      # the task's step limit cut the attempt
+                attempts.append(self.monitor.record(len(attempts), "truncated", self.step))
             info = super().get_info()
             info.update({"policy_name": "pi05_help", "policy_source": os.environ.get("HELP_PI05_SOURCE", ""),
                          "policy_exec_steps": self.exec_steps, "policy_infer_calls": self.calls,
-                         "policy_infer_s": round(self.infer_s, 2)})
+                         "policy_infer_s": round(self.infer_s, 2), "help_decide": self.decide_mode,
+                         "help_max_attempts": self.max_attempts, "help_attempts": attempts,
+                         "help_decisions": self.decisions})
             return info
 
     return Pi05TidybotPolicy
