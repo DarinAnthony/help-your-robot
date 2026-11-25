@@ -21,8 +21,8 @@ a = p.parse_args()
 
 marks = []
 pat = re.compile(r"^Step (\d+):")
-keep = re.compile(r"Error|Traceback|Exception|RESOURCE_EXHAUSTED|Killed|Resuming|Restoring|Downloading|"
-                  r"Initialized data loader|Initialized train state|Waiting for checkpoint")
+keep = re.compile(r"error|Traceback|Exception|RESOURCE_EXHAUSTED|Killed|Resuming|Restoring|Downloading|"
+                  r"Initialized data loader|Initialized train state|Waiting for checkpoint", re.I)   # uv says "error:"
 for line in sys.stdin:
     line = line.rsplit("\r", 1)[-1]   # tqdm's bar (stderr) shares these lines; keep what follows its last \r
     m = pat.match(line)
