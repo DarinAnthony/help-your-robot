@@ -414,6 +414,10 @@ def make_policy_class():
             if self.done:
                 return None
             if self.base0 is None:
+                # xemb keeps the robot across episodes, and its arm-command cap (action_constraints.ArmCommandCap)
+                # limits each command to 0.066 rad from the robot's last command: without this, the first commands
+                # slew from where the previous episode ended, as the planner policies avoid with the same call.
+                self.task.env.current_robot.reset_command_history()
                 self.base0 = np.asarray(o["qpos"]["base"], float).copy()
                 self.arm0 = np.asarray(o["qpos"]["arm"], float)[:7].copy()
                 self.sim = DrawerSim(self.task)
