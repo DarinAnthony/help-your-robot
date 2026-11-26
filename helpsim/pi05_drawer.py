@@ -67,10 +67,17 @@ GRIP_RELEASE_STEPS = int(os.environ.get("HELP_PI05_GRIP_RELEASE", "8"))
 # even holding still; the planner's re-pull returns the same way); the arm is stopped while the base drives; the base
 # is the teleop's open-loop velocity (a moving target is a velocity, covering ~90% of each move; a held target stops
 # it). So: the jaws open with
-# arm and base held; the base backs 15 cm away from the handle; the arm goes to its start pose; the base drives back;
+# arm and base held; the base backs 15 cm away from the handle; the arm goes to its start joints; the base drives back;
 # then, at most 5 s, the base is steered onto its start (RESET_GAIN times the error, within the teleop's caps) until it
 # is within 5 mm and 0.01 rad of it and the TCP within 1 cm of its start position in the base frame.
+# Joint homing: through the TCP path the joints came back 0.3-2.8 rad from their start (the hand within 8 mm), and pi0.5,
+# which reads the joints and was trained from one start configuration, never succeeded after a reset. So the arm goes
+# home in joint space, as the xArm does in its joint mode: its servos follow the start joints directly
+# (``install_joint_homing``: MeasuredArmController's own held-joints path, the one it uses while the base drives), at
+# most JOINT_STEP_RAD a step (under xemb's 0.066 rad command cap), and hold them through the drive back and the settle;
+# when pi0.5 takes over, the controller re-arms mode 7 at the measured pose, as it does after a base move.
 RESET_OPEN_S, RESET_BACK_M, RESET_HOME_S, RESET_BASE_SPEED = 1.2, 0.15, 2.5, 0.05
+JOINT_STEP_RAD = 0.05
 RESET_TOL_M, RESET_TOL_YAW, RESET_TOL_TCP_M, RESET_SETTLE_MAX_S = 0.005, 0.01, 0.01, 5.0
 RESET_GAIN, BASE_CAPS = 2.0, np.array([0.15, 0.15, 0.5])
 # The base's deadband for pi0.5's base targets. The measured arm is stopped whenever the base is commanded, and any
@@ -404,10 +411,11 @@ def make_policy_class():
 
             out = [{"arm": arm, "gripper": opened, "base": world(here)}] * self.n(RESET_OPEN_S)
             out += drive(arm, here, back)
-            n = self.n(RESET_HOME_S)
-            out += [{"arm": arm + (self.arm0 - arm) * i / n, "gripper": opened, "base": world(back)}
-                    for i in range(1, n + 1)]
-            out += drive(self.arm0, back, np.zeros(3))
+            q = np.asarray(o["qpos"]["arm"], float)[:7]      # held there (mode 7, then the base's hold) until now
+            n = max(self.n(RESET_HOME_S), int(np.ceil(np.abs(self.arm0 - q).max() / JOINT_STEP_RAD)))
+            out += [{"arm": q + (self.arm0 - q) * i / n, "gripper": opened, "base": world(back),
+                     "joint": q + (self.arm0 - q) * i / n} for i in range(1, n + 1)]
+            out += [dict(c, joint=self.arm0) for c in drive(self.arm0, back, np.zeros(3))]
             self.settle_left, self.settle_steps, self.reset_steps = self.n(RESET_SETTLE_MAX_S), 0, len(out)
             self.vtarget = out[-1]["base"].copy()
             return out
@@ -426,7 +434,7 @@ def make_policy_class():
                 return None
             if not base_ok:      # the teleop reads the target's motion as the velocity
                 self.vtarget = self.vtarget + np.clip(RESET_GAIN * e, -BASE_CAPS, BASE_CAPS) * self.dt
-            return {"arm": self.arm0, "gripper": np.array([0.0]), "base": self.vtarget.copy()}
+            return {"arm": self.arm0, "gripper": np.array([0.0]), "base": self.vtarget.copy(), "joint": self.arm0}
 
         def n(self, s: float) -> int:
             return max(1, round(s / self.dt))
@@ -440,6 +448,7 @@ def make_policy_class():
                 # limits each command to 0.066 rad from the robot's last command: without this, the first commands
                 # slew from where the previous episode ended, as the planner policies avoid with the same call.
                 self.task.env.current_robot.reset_command_history()
+                self.joint_target(None)
                 self.base0 = np.asarray(o["qpos"]["base"], float).copy()
                 self.arm0 = np.asarray(o["qpos"]["arm"], float)[:7].copy()
                 self.sim = DrawerSim(self.task)
@@ -486,9 +495,16 @@ def make_policy_class():
                         "tcp_err_m": round(float(np.linalg.norm(self.sim.tcp_in_base() - self.tcp0)), 4),
                         "reset_steps": self.reset_steps, "settle_steps": self.settle_steps}
                 cmd = self.pi05(o)
+            self.joint_target(cmd.get("joint"))      # pi0.5's commands have none: mode 7 again
             self.last = cmd
             self.step += 1
-            return {k: np.asarray(v, float).copy() for k, v in cmd.items()}
+            return {k: np.asarray(v, float).copy() for k, v in cmd.items() if k != "joint"}
+
+        def joint_target(self, q) -> None:
+            """Joint homing (JOINT_STEP_RAD above): the arm's servos follow ``q``; None hands the arm back to mode 7."""
+            c = getattr(self.task.env.current_robot, "_controllers", {}).get("arm")
+            if hasattr(c, "_held_q"):           # the measured command path's arm (install_joint_homing)
+                c.help_joint_target = None if q is None else np.asarray(q, float).copy()
 
         def get_info(self) -> dict:
             attempts = list(self.attempts)
@@ -505,9 +521,35 @@ def make_policy_class():
     return Pi05TidybotPolicy
 
 
+def install_joint_homing() -> None:
+    """MeasuredArmController with ``help_joint_target`` set: the servos follow that joint target, the arm held against
+    gravity, as the controller holds its joints while the base drives (and marked held, so that once the target is
+    cleared the next step re-arms mode 7 at the measured pose). Unset, the controller is unchanged."""
+    from molmo_spaces.controllers.measured import MeasuredArmController
+
+    original = MeasuredArmController.compute_ctrl_inputs
+    if getattr(original, "_help_joint_homing", False):
+        return
+
+    def compute_ctrl_inputs(self):
+        q = getattr(self, "help_joint_target", None)
+        if q is None:
+            return original(self)
+        self._t = float(self.d.time)
+        self._held_q = q.copy()
+        self.d.qfrc_applied[self.arm.arm_v] = self.d.qfrc_bias[self.arm.arm_v]
+        self._record()
+        return q.copy()
+
+    compute_ctrl_inputs._help_joint_homing = True
+    MeasuredArmController.compute_ctrl_inputs = compute_ctrl_inputs
+
+
 def install() -> None:
     """Every episode of the datagen pipeline gets a Pi05TidybotPolicy instead of its configured planner."""
     import molmo_spaces.data_generation.pipeline as pipeline
+
+    install_joint_homing()
 
     cls = make_policy_class()
 
