@@ -5,16 +5,17 @@
 #
 # The notebook serves its ROOT (assets/, logs/, checkpoints/) at that URL. Every 5 minutes this copies assets/ and
 # logs/, and the newest checkpoint the notebook marked finished (checkpoints/<cfg>/<exp>/.<step>.done) that is not on
-# Drive yet; once it is complete there, the older checkpoint on Drive is removed. It then writes manifest.json next to
+# Drive yet: first to data/pi05/ here, then to Drive; once it is complete there, the older checkpoint on Drive is removed. It then writes manifest.json next to
 # it ({"step", "files": {path under pi05/: Drive file id}}) and prints its id: the notebook's RESTORE, which fetches
-# that checkpoint through Drive's public link on a fresh runtime. Data flows Colab -> this Mac -> Drive, nothing is
-# kept here.
+# that checkpoint through Drive's public link on a fresh runtime. The notebook's tunnels use HTTP/2: over QUIC, Colab
+# served about 100 KB/s.
 set -uo pipefail
 URL="${1:?usage: scripts/pull_ckpt.sh <tunnel url> <config> <exp> [once]}"; CFG="${2:?config}"; EXP="${3:?exp}"
 RCLONE="${RCLONE:-$HOME/micromamba/envs/tools/bin/rclone}"
 DEST="${HELP_DRIVE_REMOTE:-gdrive}:${HELP_DRIVE_PI05:-stanford/classes/cs238/help-your-robot/pi05}"
 SRC=":http,url='$URL':"
 C="checkpoints/$CFG/$EXP"
+LOCAL="${HELP_PI05_LOCAL:-$(cd "$(dirname "$0")/.." && pwd)/data/pi05}"   # git-ignored
 # python's http.server has no range requests: one stream per file.
 rc() {
   "$RCLONE" --multi-thread-streams 0 --retries 5 --low-level-retries 20 "$@" 2>&1 | grep -v 'NOTICE\|client_id\|common hash'
@@ -28,9 +29,15 @@ pull_once() {
   last=$("$RCLONE" lsf "${SRC}$C" 2>/dev/null | sed -n 's/^\.\([0-9]*\)\.done$/\1/p' | sort -n | tail -1)
   [ -n "$last" ] || return 0
   "$RCLONE" lsf "$DEST/$C/.$last.done" >/dev/null 2>&1 && return 0
-  echo "$(date '+%F %T') copying step $last to Drive"
-  rc copy "${SRC}$C/$last" "$DEST/$C/$last" -q
-  rc check "${SRC}$C/$last" "$DEST/$C/$last" --size-only --one-way -q || { echo "step $last incomplete, will retry"; return 0; }
+  # Download first, then upload: streaming from the tunnel straight into Drive's upload stalled, and the local copy
+  # is a backup. Only the newest checkpoint is kept here.
+  echo "$(date '+%F %T') downloading step $last to $LOCAL/$C"
+  rc copy "${SRC}$C/$last" "$LOCAL/$C/$last" -q
+  rc check "${SRC}$C/$last" "$LOCAL/$C/$last" --size-only --one-way -q || { echo "step $last download incomplete, will retry"; return 0; }
+  for old in $(ls "$LOCAL/$C" | grep -E '^[0-9]+$'); do [ "$old" = "$last" ] || rm -rf "$LOCAL/$C/$old"; done
+  echo "$(date '+%F %T') uploading step $last to Drive"
+  rc copy "$LOCAL/$C/$last" "$DEST/$C/$last" -q
+  rc check "$LOCAL/$C/$last" "$DEST/$C/$last" --size-only --one-way -q || { echo "step $last upload incomplete, will retry"; return 0; }
   "$RCLONE" touch "$DEST/$C/.$last.done" 2>/dev/null
   for old in $("$RCLONE" lsf "$DEST/$C" --dirs-only 2>/dev/null | tr -d / | grep -E '^[0-9]+$'); do
     [ "$old" = "$last" ] || { rc purge "$DEST/$C/$old"; rc deletefile "$DEST/$C/.$old.done"; }
