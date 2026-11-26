@@ -33,6 +33,15 @@ from scripts.collect_shelf_pnp import MODES, SPLITS  # noqa: E402
 OBJECTS = [o for objs in SPLITS.values() for o in objs]
 
 
+def _json_default(x):
+    """numpy scalars and arrays in a record (a tree node's numpy bool once ended a run)."""
+    if isinstance(x, np.generic):
+        return x.item()
+    if isinstance(x, np.ndarray):
+        return x.tolist()
+    raise TypeError(f"Object of type {type(x).__name__} is not JSON serializable")
+
+
 def seeds_for(obj: str, seed0: int, n: int) -> list[int]:
     k = OBJECTS.index(obj)
     return list(range(seed0 + 1000 * k, seed0 + 1000 * k + n))
@@ -114,7 +123,8 @@ def collect(a, trees: bool) -> None:
             n_ok += ok
             with open(log, "a") as f:
                 f.write(json.dumps({"seed": seed, "object": obj, "mode": a.mode, "faults": ro.env.faults,
-                                    "server": meta, "wall_s": round(time.perf_counter() - t, 1), **rec}) + "\n")
+                                    "server": meta, "wall_s": round(time.perf_counter() - t, 1), **rec},
+                                   default=_json_default) + "\n")
             summary = ([n["outcome"] for n in rec["nodes"][1:]] if trees else
                        [x["outcome"] for x in rec["attempts"]])
             print(f"{obj:12s} {seed}  {summary}  ({time.perf_counter() - t:.0f}s)", flush=True)
