@@ -15,7 +15,8 @@ camera by ``helpsim/xemb_hooks.py``) and ``wrist_camera`` resized to 180x320; st
 (x, y, yaw) in the episode's first base frame; action = 7 arm joint targets, gripper command / 255, base target in the
 same frame. The observation at step k gets the command for step k+1, and each chunk's first ``$HELP_PI05_EXEC``
 (default 8) commands are executed, one per policy step (~15 Hz). A base target within 2 mm (0.005 rad) of the last one sent is sent as
-the last one, unchanged (BASE_DEADBAND_M): the measured arm stands still while the base is commanded.
+the last one, unchanged (BASE_DEADBAND_M): the measured arm stands still while the base is commanded. A close holds until
+pi0.5 asks for open 8 steps in a row (GRIP_RELEASE_STEPS): its chunks flicker back to open before the jaws have moved.
 
 **Attempts** (TASK_SPEC.md §4), from sim state before every policy step (``DrawerMonitor``):
 
@@ -53,6 +54,13 @@ GRASP_S = 2.5                  # closed this long without a hold: a grasp miss (
 LOST_S = 0.3                   # pads off the drawer this long after a hold: the hold is lost
 STALL_S, STALL_M = 2.0, 0.005
 CLOSING = 0.5                  # gripper command (fraction of 255) that counts as closing
+# The gripper latch. pi0.5's state has the jaws' position, not its last command: after a close command the jaws have
+# barely moved when the next chunk is planned (in the expert data, frames with the jaws part-closed are 2-3 per
+# episode, against many open ones before the close), and the chunks fall back to open. Executed as given, the jaws
+# never close (commands 255 255 0 0 0 0 0 255 ...; the jaws stall at 0.24, the expert's reach 0.79). So a close holds
+# until pi0.5 asks for open GRIP_RELEASE_STEPS steps in a row ($HELP_PI05_GRIP_RELEASE; 0 turns the latch off): the
+# flicker's open runs were at most 5 steps, the expert's release is a long one.
+GRIP_RELEASE_STEPS = int(os.environ.get("HELP_PI05_GRIP_RELEASE", "8"))
 # Reset, through xemb's measured command path (``molmo_spaces/controllers/measured.py``): the arm tracks a TCP pose (a
 # joint target goes through FK, the hub's 40 mm lead and the mode-7 tracker's IK), so the hand returns to its start
 # pose but the redundant 7-joint arm need not return to its start joints (they drift 0.3-0.5 rad in its null space,
@@ -294,6 +302,7 @@ def make_policy_class():
             self.sim = self.monitor = None
             self.attempts, self.decisions, self.queue = [], [], []
             self.last = None          # the last command sent: {"arm", "gripper", "base"}
+            self.grip_closed, self.open_run = False, 0     # the gripper latch (GRIP_RELEASE_STEPS)
             self.settle_left = 0      # policy steps left to wait for the reset to arrive
             self.settle_steps = self.reset_steps = 0
             self.done = False
@@ -311,8 +320,20 @@ def make_policy_class():
             return inp
 
         def to_command(self, a) -> dict:
-            return {"arm": np.asarray(a[:7], float), "gripper": np.array([float(np.clip(a[7] * 255.0, 0.0, 255.0))]),
+            return {"arm": np.asarray(a[:7], float), "gripper": np.array([self.gripper(float(a[7]))]),
                     "base": self.base_target(np.asarray(a[8:11], float))}
+
+        def gripper(self, g: float) -> float:
+            """pi0.5's gripper output (fraction of 255) -> the command, through the latch (GRIP_RELEASE_STEPS above)."""
+            if GRIP_RELEASE_STEPS <= 0:
+                return float(np.clip(g * 255.0, 0.0, 255.0))
+            if not self.grip_closed:
+                self.grip_closed, self.open_run = g >= CLOSING, 0
+            else:
+                self.open_run = self.open_run + 1 if g < CLOSING else 0
+                if self.open_run >= GRIP_RELEASE_STEPS:
+                    self.grip_closed = False
+            return 255.0 if self.grip_closed else 0.0
 
         def base_target(self, b: np.ndarray) -> np.ndarray:
             """pi0.5's base target (first frame) -> world, through the deadband (BASE_DEADBAND_M above)."""
@@ -365,6 +386,7 @@ def make_policy_class():
                 if isinstance(self.src, ReplaySource):
                     self.src_step = 0          # the recording starts again from the start pose
             self.chunk = None                   # pi0.5 re-plans from the attempt's first observation
+            self.grip_closed, self.open_run = False, 0     # the reset opened the jaws
             self.monitor = None                 # started when the reset (if any) has finished
 
         def reset_commands(self, o: dict) -> list[dict]:
