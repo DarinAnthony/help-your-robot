@@ -298,8 +298,11 @@ def install_tidybot_cameras() -> None:
         if _has_mast(config.robot_config):
             cameras = config.camera_config.cameras
             wrist = next(c for c in cameras if c.name == "wrist_camera")
+            # $HELP_WRIST_FOV (deg): the wrist camera's field of view instead of the MJCF one (testing what a
+            # recorded run rendered).
+            fov = float(os.environ["HELP_WRIST_FOV"]) if os.environ.get("HELP_WRIST_FOV") else None
             config.camera_config.cameras = [
-                wrist.model_copy(update={"fov": None}),
+                wrist.model_copy(update={"fov": fov}),
                 MjcfCameraConfig(name="exo_camera_1", mjcf_name="mast_camera", robot_namespace="robot_0/", fov=None),
             ]
             print("[help!] exo_camera_1 = the robot's mast_camera; wrist_camera at its MJCF fovy", flush=True)
