@@ -14,7 +14,8 @@ Observations and actions match ``scripts/to_lerobot.py``'s drawer dataset: ``exo
 camera by ``helpsim/xemb_hooks.py``) and ``wrist_camera`` resized to 180x320; state = 7 arm joints, gripper, base
 (x, y, yaw) in the episode's first base frame; action = 7 arm joint targets, gripper command / 255, base target in the
 same frame. The observation at step k gets the command for step k+1, and each chunk's first ``$HELP_PI05_EXEC``
-(default 8) commands are executed, one per policy step (~15 Hz).
+(default 8) commands are executed, one per policy step (~15 Hz). A base target within 2 mm (0.005 rad) of the last one sent is sent as
+the last one, unchanged (BASE_DEADBAND_M): the measured arm stands still while the base is commanded.
 
 **Attempts** (TASK_SPEC.md §4), from sim state before every policy step (``DrawerMonitor``):
 
@@ -64,6 +65,14 @@ CLOSING = 0.5                  # gripper command (fraction of 255) that counts a
 RESET_OPEN_S, RESET_BACK_M, RESET_HOME_S, RESET_BASE_SPEED = 1.2, 0.15, 2.5, 0.05
 RESET_TOL_M, RESET_TOL_YAW, RESET_TOL_TCP_M, RESET_SETTLE_MAX_S = 0.005, 0.01, 0.01, 5.0
 RESET_GAIN, BASE_CAPS = 2.0, np.array([0.15, 0.15, 0.5])
+# The base's deadband for pi0.5's base targets. The measured arm is stopped whenever the base is commanded, and any
+# change of the base target, however small, commands it (MeasuredBaseController.set_target: the change over the time
+# since the last one becomes a velocity). The expert sends the very same base target while the arm works (71% of its
+# steps); when it drives the base, each step moves it 2 mm or more (median 5.8 mm). pi0.5's base output wanders by
+# ~0.4 mm a step, so taken as it is, the base "drives" all the time and the arm never moves. A pi0.5 base target is
+# therefore sent only when it is at least BASE_DEADBAND_M (or BASE_DEADBAND_YAW) from the last base target sent;
+# otherwise the last one is sent again, unchanged.
+BASE_DEADBAND_M, BASE_DEADBAND_YAW = 0.002, 0.005
 TCP_SITE = "robot_0/arm/link_tcp"
 DEBUG = bool(os.environ.get("HELP_PI05_DEBUG"))   # a line per policy step and per reset step
 STUCK_M = 0.05                 # scripts/drawer_attempts.py: a failed pull under 5 cm of travel is "stuck"
@@ -303,7 +312,17 @@ def make_policy_class():
 
         def to_command(self, a) -> dict:
             return {"arm": np.asarray(a[:7], float), "gripper": np.array([float(np.clip(a[7] * 255.0, 0.0, 255.0))]),
-                    "base": to_world(a[8:11], self.base0)}
+                    "base": self.base_target(np.asarray(a[8:11], float))}
+
+        def base_target(self, b: np.ndarray) -> np.ndarray:
+            """pi0.5's base target (first frame) -> world, through the deadband (BASE_DEADBAND_M above)."""
+            last = np.asarray(self.last["base"] if self.last else self.base0, float)
+            held = to_first_frame(last, self.base0)[0]
+            d = b - held
+            d[2] = (d[2] + np.pi) % (2 * np.pi) - np.pi
+            if np.hypot(d[0], d[1]) < BASE_DEADBAND_M and abs(d[2]) < BASE_DEADBAND_YAW:
+                return last.copy()
+            return to_world(b, self.base0)
 
         def pi05(self, o: dict) -> dict:
             if self.chunk is None or self.i >= self.exec_steps:
