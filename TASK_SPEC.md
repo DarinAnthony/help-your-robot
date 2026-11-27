@@ -55,7 +55,7 @@ successes, for about 1,000 demos (`data/shelf_pnp/pi05_demos/`). 5% of them, cho
 | Drawers | nominal (train); hard, stuck, locked, transient stop, weak grip (fault conditions, evaluation only); medium (held out, test only) |
 | pi0.5 observation | mast camera + wrist camera, rendered as in collection, 224×224; state: 7 arm joints + gripper + base pose (x, y, θ) |
 | pi0.5 action | arm joint targets (7) + gripper (1) + base command (3), xemb's ~15 Hz policy step; chunk of 32 |
-| Success | xemb's `judge_success` (drawer open) |
+| Success | the demo drawer open past the task's threshold (45% of its travel); xemb's `judge_success` counts any articulated object |
 | Attempt limit | 25 s per pull; 3 pulls per episode |
 
 **Training data.** Successful **nominal** episodes only, so every fault drawer stays unseen by pi0.5: 70 now
@@ -108,12 +108,13 @@ between), the stand-in server on the stuck drawer (three 25 s timeouts, resets b
 - **When:** before each attempt k = 1, 2, 3: at the start, and after each failed attempt.
 - **Actions:**
   - **continue:** pi0.5 resumes from the current state;
-  - **reset and retry:** arm to home, gripper open (and the base back to its start, on the drawer), then pi0.5;
-    on the drawer, through xemb's measured command path, the jaws open, the base backs 15 cm off the handle, the arm
-    goes to its start pose, the base drives back and is steered onto its start (within 5 mm, the TCP within 1 cm of
-    its start in the base frame; ~10 s). The arm tracks TCP poses there, so the redundant xArm7's joints drift in its
-    null space (0.3–0.5 rad from the start joints, even while holding still) and the reset matches the hand, not the
-    joints;
+  - **reset and retry:** arm to home, gripper open (and the base back to its start, on the drawer), then pi0.5.
+    On the drawer (`helpsim/pi05_drawer.py`, RESET_*): the jaws open, the base backs 15 cm off the handle, the hand
+    returns to its start pose through xemb's measured command path, then the arm goes to its start joints in joint
+    space (the TCP path alone left the redundant xArm7's joints 0.3–2.8 rad off, a start pi0.5 never saw), the base
+    drives back and is steered onto its start; on the last step the jaws and the base are put back exactly where the
+    episode started, at rest (a human reset). A retry then starts from the episode's own start state, and succeeds as
+    often as a first attempt (4/8 retries, 4/9 first attempts, 2026-11-26);
   - **ask:** the episode ends in success (oracle help).
 - **Reward:**
   - +10 for autonomous success;
