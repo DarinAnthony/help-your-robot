@@ -178,7 +178,10 @@ class DifficultyHead:
 
 # The drawer's failed pulls, by how far the drawer moved (drawer_max_m): locked ~8 mm, stuck 19-20 mm, a failed hard
 # pull ~34 mm, "short" >= 5 cm (EXPERIMENT_PLAN.md §3). The outcome categories alone lump the first three together.
-DRAWER_TRAVEL_BINS = (0.012, 0.026, 0.05)
+# Under 4 mm: no pull to speak of (pi0.5's grasp misses and early slips; the expert's failed pulls all held), so the
+# locked drawer's 8 mm stop gets a bin of its own: pi0.5's failed attempts in 4-12 mm are 20 of 36 on the locked drawer,
+# 1 of 16 on the stuck one, none of 55 on the others (2026-11-26 runs).
+DRAWER_TRAVEL_BINS = (0.004, 0.012, 0.026, 0.05)
 
 
 class ObservationModel:
