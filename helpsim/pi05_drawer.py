@@ -79,9 +79,12 @@ GRIP_RELEASE_STEPS = int(os.environ.get("HELP_PI05_GRIP_RELEASE", "8"))
 # (``install_joint_homing``: MeasuredArmController's own held-joints path, the one it uses while the base drives), at
 # most JOINT_STEP_RAD a step (under xemb's 0.066 rad command cap), and hold them through the drive back and the settle;
 # when pi0.5 takes over, the controller re-arms mode 7 at the measured pose, as it does after a base move. The jaws are
-# put back to the episode's start opening on the settle's last step (``DrawerSim.restore_jaws``): every episode starts
-# with them wider than the G2's commanded open (84 mm at most, the bridge's 75 mm), and retries began with the arm at
-# its start and the jaws at 75 mm (state 0.16-0.23 against 0.0), a pair pi0.5 never saw in training.
+# put back to the episode's start opening on the settle's last step, and the base onto its start pose at rest
+# (``DrawerSim.restore_start``): every episode starts with the jaws wider than the G2's commanded open (84 mm at most,
+# the bridge's 75 mm), and retries began with the arm at its start and the jaws at 75 mm (state 0.16-0.23 against 0.0),
+# a pair pi0.5 never saw in training; and with the base still coasting from the settle (overshooting to +7 mm, then
+# creeping to +11 mm): the arm stood still while it moved, and in training the base is exactly at its start through the
+# whole approach and only ever goes back (x < 0).
 RESET_OPEN_S, RESET_BACK_M, RESET_HOME_S, RESET_BASE_SPEED = 1.2, 0.15, 2.5, 0.05
 JOINT_STEP_RAD = 0.05
 JOINT_HOME = "_joint_home"     # the reset queue's marker for the joint-space phase (built from the joints then)
@@ -160,22 +163,27 @@ class DrawerSim:
         self.jaw_q = np.array([int(m.jnt_qposadr[j]) for j in jaws])
         self.jaw_v = np.array([int(m.jnt_dofadr[j]) for j in jaws])
         self.jaw0 = self.data.qpos[self.jaw_q].copy()
+        base_joints = [m.joint(f"robot_0/joint_{a}").id for a in ("x", "y", "th")]
+        self.base_q = np.array([int(m.jnt_qposadr[j]) for j in base_joints])
+        self.base_v = np.array([int(m.jnt_dofadr[j]) for j in base_joints])
+        self.base_q0 = self.data.qpos[self.base_q].copy()
 
     @property
     def data(self):
         return self.task.env.current_data
 
-    def restore_jaws(self, gripper_controller) -> None:
-        """The jaws back to the episode's start opening (free of contact, at the end of a reset); the measured jaws'
-        emulator restarts from there."""
+    def restore_start(self, controllers: dict) -> None:
+        """The end of a reset: the jaws back to the episode's start opening (free of contact) and the base, a few mm off
+        and still coasting, onto its start pose at rest; the measured jaws' and base's emulators restart from there."""
         import mujoco
 
         d = self.data
-        d.qpos[self.jaw_q] = self.jaw0
-        d.qvel[self.jaw_v] = 0.0
+        d.qpos[self.jaw_q], d.qvel[self.jaw_v] = self.jaw0, 0.0
+        d.qpos[self.base_q], d.qvel[self.base_v] = self.base_q0, 0.0
         mujoco.mj_forward(self.model, d)
-        if gripper_controller is not None:
-            gripper_controller.reset()
+        for name in ("gripper", "base"):
+            if controllers.get(name) is not None:
+                controllers[name].reset()
 
     def drawer_m(self) -> float:
         return float(self.data.qpos[self.slide])
@@ -471,8 +479,9 @@ def make_policy_class():
             base_ok = np.linalg.norm(e[:2]) < RESET_TOL_M and abs(e[2]) < RESET_TOL_YAW
             arrived = base_ok and np.linalg.norm(self.sim.tcp_in_base() - self.tcp0) < RESET_TOL_TCP_M
             if (arrived or self.settle_left <= 1) and not self.jaws_restored:
-                self.sim.restore_jaws(self.controllers().get("gripper"))    # one more hold step: the next
-                self.jaws_restored = True                                   # observation shows them restored
+                self.sim.restore_start(self.controllers())    # one more hold step: the next observation shows it
+                self.jaws_restored = True
+                self.vtarget = self.base0.copy()             # the base's target where it now stands, at rest
                 return {"arm": self.arm0, "gripper": np.array([0.0]), "base": self.vtarget.copy(), "joint": self.arm0}
             if arrived:
                 return None
