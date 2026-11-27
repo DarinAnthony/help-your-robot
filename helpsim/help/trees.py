@@ -122,6 +122,10 @@ def load_drawer_trees(root: Path, runs: str = "tidybot_open_rp_*") -> list[Tree]
                 nodes[path] = {"path": path, "outcome": a["outcome"], "fail_phase": None,
                                "state": {**{k: a[k] for k in ("drawer_max_m", "drawer_end_m", "base_travel_m")},
                                          "event": a.get("event")}}      # pi0.5 runs: the monitor's event
+            for d in r.get("decisions", []):      # pi0.5 runs: its spread at decision k, seen after attempt k - 1
+                path = "P" * d["attempt"]
+                if d.get("spread") and path in nodes:
+                    nodes[path]["state"]["spread"] = d["spread"]
             seed = zlib.crc32(f'{r["run"]}/{r["file"]}/{r["traj"]}'.encode())     # stable across processes
             out.append(Tree("drawer", cond, cond, "heldout" if cond in DRAWER_HELD_OUT else "train", seed,
                             np.zeros(3), np.zeros(3), nodes))

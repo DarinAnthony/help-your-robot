@@ -188,7 +188,8 @@ class ObservationModel:
     """P(o | d, a, k) with additive smoothing over observation symbols. A symbol is the attempt's outcome, refined for
     the drawer by its travel bin (``travel_bins``); ``coarse`` keeps only success / failure / terminal failure types."""
 
-    def __init__(self, family_spec: dict, coarse: bool = False, alpha: float = 0.5, travel_bins: tuple | None = None):
+    def __init__(self, family_spec: dict, coarse: bool = False, alpha: float = 0.5, travel_bins: tuple | None = None,
+                 spread_key: str | None = None):
         self.spec, self.coarse, self.alpha, self.bins = family_spec, coarse, alpha, travel_bins
         tf = family_spec["terminal_fail"]
         if coarse:
@@ -198,19 +199,34 @@ class ObservationModel:
         else:
             self.outcomes = family_spec["outcomes"]
         self.terminal_fail = tf
+        # ``spread_key``: each failure symbol also says whether pi0.5's spread at the next decision (node state
+        # ``spread``, e.g. ``arm_std_exec``) is above the training median: low (_lo), high (_hi) or not recorded (_na).
+        self.spread_key, self.spread_thr = spread_key, None
+        if spread_key:
+            self.outcomes = tuple(o if o == "success" or o in tf else f"{o}_{s}" for o in self.outcomes
+                                  for s in (("",) if o == "success" or o in tf else ("lo", "hi", "na")))
 
     def obs(self, outcome: str, state: dict | None = None) -> str:
         if outcome == "success" or outcome in self.terminal_fail:
             return outcome
         if self.coarse:
-            return "fail"
-        if self.bins:
-            return f"travel{int(np.searchsorted(self.bins, (state or {}).get('drawer_max_m', 0.0)))}"
-        return outcome
+            sym = "fail"
+        elif self.bins:
+            sym = f"travel{int(np.searchsorted(self.bins, (state or {}).get('drawer_max_m', 0.0)))}"
+        else:
+            sym = outcome
+        if self.spread_key:
+            v = ((state or {}).get("spread") or {}).get(self.spread_key)
+            sym += "_na" if v is None or self.spread_thr is None else ("_hi" if v > self.spread_thr else "_lo")
+        return sym
 
     def fit(self, train: list[Tree]) -> "ObservationModel":
         acts = sorted(set(self.spec["actions"]) | set(self.spec["root_actions"]))
         self.acts = acts
+        if self.spread_key:      # the median spread after a failed attempt, over the training nodes
+            vals = [n["state"]["spread"][self.spread_key] for t in train for p, n in t.nodes.items()
+                    if p and n["outcome"] != "success" and (n["state"].get("spread") or {}).get(self.spread_key) is not None]
+            self.spread_thr = float(np.median(vals)) if vals else None
         n = np.full((len(DIFFICULTIES), MAX_ATTEMPTS, len(acts), len(self.outcomes)), self.alpha)
         for t in train:
             d = DIFFICULTIES.index(t.difficulty)
@@ -251,6 +267,8 @@ class BeliefPlanner:
         return tuple(a for a in acts if self.allowed is None or a in self.allowed)
 
     def _step(self, o: str) -> tuple[float, bool]:
+        if o.endswith(("_lo", "_hi", "_na")):          # spread-refined symbols (ObservationModel spread_key)
+            o = o[:-3]
         if o == "fail" or o.startswith("travel"):     # a non-terminal failure symbol
             return -self.c.c_fail, False
         return outcome_reward(o, self.c, self.obs.terminal_fail)

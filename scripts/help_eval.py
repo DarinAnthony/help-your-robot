@@ -116,7 +116,7 @@ def predictor_metrics(Vs: dict, heads: dict, trees) -> dict:
     return out
 
 
-def evaluate(trees, family, rng, costs_grid, emb=None) -> dict:
+def evaluate(trees, family, rng, costs_grid, emb=None, spread_key: str = "arm_std_exec") -> dict:
     train = [t for t in trees if t.fold == "train"]
     cal = [t for t in trees if t.fold == "cal"]
     test = [t for t in trees if t.fold == "test"]
@@ -125,6 +125,9 @@ def evaluate(trees, family, rng, costs_grid, emb=None) -> dict:
     head = P.DifficultyHead().fit(train)
     obs = P.ObservationModel(spec, travel_bins=P.DRAWER_TRAVEL_BINS if family == "drawer" else None).fit(train)
     obs_coarse = P.ObservationModel(spec, coarse=True).fit(train)
+    has_spread = family == "drawer" and any("spread" in n["state"] for t in train for n in t.nodes.values())
+    if has_spread:      # pi0.5's drawer runs: its spread at each decision point (5 sampled chunks)
+        obs_spread = P.ObservationModel(spec, travel_bins=P.DRAWER_TRAVEL_BINS, spread_key=spread_key).fit(train)
     onehot = lambda t: np.eye(3)[DIFFICULTIES.index(t.difficulty)]
     Vs, heads = {"V0": V}, {"difficulty": head}
     if emb is not None:     # V1 and the image prior (scripts/embed_trees.py)
@@ -164,6 +167,8 @@ def evaluate(trees, family, rng, costs_grid, emb=None) -> dict:
             }
             if family == "expert":
                 methods["A4 Ours, attempt only"] = P.BeliefPlanner(obs, head, c, actions=("A",))
+            if has_spread:
+                methods["A6 Ours + pi0.5 spread"] = P.BeliefPlanner(obs_spread, head, c)
             if emb is not None:
                 tau6i, _ = tune(cal, lambda g: P.v_threshold(V1, g), TAUS, c)
                 methods["B6' V1_k threshold (images)"] = P.v_threshold(V1, tau6i)
@@ -368,6 +373,8 @@ def main() -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--quick", action="store_true", help="only the default costs")
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--spread-key", default="arm_std_exec", help="pi0.5 drawer runs: the spread statistic for A6 "
+                   "(arm_std_exec, arm_std_chunk, grip_std_exec, base_std_exec)")
     p.add_argument("--drawer-runs", default="tidybot_open_rp_*",
                    help="drawer family: run-name glob under --trees (pi0.5's runs: e.g. 'pi05_drawer_*')")
     p.add_argument("--no-images", action="store_true", help="skip V1 even if <trees>/dinov2_vits14.npz exists")
@@ -382,7 +389,7 @@ def main() -> None:
         missing = sum(not emb.has(t) for t in trees)
         if missing:
             raise SystemExit(f"{missing} trees have no embeddings: rerun scripts/embed_trees.py")
-    res = evaluate(trees, a.family, np.random.default_rng(a.seed), grid, emb)
+    res = evaluate(trees, a.family, np.random.default_rng(a.seed), grid, emb, spread_key=a.spread_key)
     a.out.mkdir(parents=True, exist_ok=True)
     (a.out / "results.json").write_text(json.dumps(res, indent=1))
     figs = [] if a.quick else figures(res, a.out, a.family)
