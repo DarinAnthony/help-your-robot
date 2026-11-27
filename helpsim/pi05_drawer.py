@@ -67,17 +67,24 @@ GRIP_RELEASE_STEPS = int(os.environ.get("HELP_PI05_GRIP_RELEASE", "8"))
 # even holding still; the planner's re-pull returns the same way); the arm is stopped while the base drives; the base
 # is the teleop's open-loop velocity (a moving target is a velocity, covering ~90% of each move; a held target stops
 # it). So: the jaws open with
-# arm and base held; the base backs 15 cm away from the handle; the arm goes to its start joints; the base drives back;
+# arm and base held; the base backs 15 cm away from the handle; the hand goes to its start pose, then the arm to its
+# start joints; the base drives back;
 # then, at most 5 s, the base is steered onto its start (RESET_GAIN times the error, within the teleop's caps) until it
 # is within 5 mm and 0.01 rad of it and the TCP within 1 cm of its start position in the base frame.
 # Joint homing: through the TCP path the joints came back 0.3-2.8 rad from their start (the hand within 8 mm), and pi0.5,
-# which reads the joints and was trained from one start configuration, never succeeded after a reset. So the arm goes
-# home in joint space, as the xArm does in its joint mode: its servos follow the start joints directly
+# which reads the joints and was trained from one start configuration, never succeeded after a reset. So once the hand
+# is home (TCP path, as before: a joint-space path straight from where an attempt ended swept the fingers through a
+# cabinet front and dragged it open), the arm goes to its start joints in joint space, as the xArm does in its joint
+# mode, mostly a self-motion with the hand in place and the base backed off: its servos follow the start joints directly
 # (``install_joint_homing``: MeasuredArmController's own held-joints path, the one it uses while the base drives), at
 # most JOINT_STEP_RAD a step (under xemb's 0.066 rad command cap), and hold them through the drive back and the settle;
-# when pi0.5 takes over, the controller re-arms mode 7 at the measured pose, as it does after a base move.
+# when pi0.5 takes over, the controller re-arms mode 7 at the measured pose, as it does after a base move. The jaws are
+# put back to the episode's start opening on the settle's last step (``DrawerSim.restore_jaws``): every episode starts
+# with them wider than the G2's commanded open (84 mm at most, the bridge's 75 mm), and retries began with the arm at
+# its start and the jaws at 75 mm (state 0.16-0.23 against 0.0), a pair pi0.5 never saw in training.
 RESET_OPEN_S, RESET_BACK_M, RESET_HOME_S, RESET_BASE_SPEED = 1.2, 0.15, 2.5, 0.05
 JOINT_STEP_RAD = 0.05
+JOINT_HOME = "_joint_home"     # the reset queue's marker for the joint-space phase (built from the joints then)
 RESET_TOL_M, RESET_TOL_YAW, RESET_TOL_TCP_M, RESET_SETTLE_MAX_S = 0.005, 0.01, 0.01, 5.0
 RESET_GAIN, BASE_CAPS = 2.0, np.array([0.15, 0.15, 0.5])
 # The base's deadband for pi0.5's base targets. The measured arm is stopped whenever the base is commanded, and any
@@ -129,6 +136,8 @@ class DrawerSim:
         self.model = m
         j = m.joint(f"{DRAWER}/slide")
         self.slide = int(m.jnt_qposadr[j.id])
+        self.slide_range = float(abs(m.jnt_range[j.id][1] - m.jnt_range[j.id][0]))
+        self.threshold = float(task.config.task_config.task_success_threshold)
         root = int(m.jnt_bodyid[j.id])
         bodies = {root}
         for b in range(m.nbody):      # the drawer body and everything below it (front, handle)
@@ -145,10 +154,28 @@ class DrawerSim:
         self.base = [int(m.jnt_qposadr[m.joint(f"robot_0/joint_{a}").id]) for a in ("x", "y")]
         self.yaw = int(m.jnt_qposadr[m.joint("robot_0/joint_th").id])
         self.tcp = m.site(TCP_SITE).id
+        # The gripper's joints (drivers and their linkage) where the episode starts (DrawerSim is built on its first step).
+        jaws = [j for j in range(m.njnt) if m.joint(j).name.startswith("robot_0/arm/")
+                and any(k in m.joint(j).name for k in ("driver_joint", "finger_joint", "knuckle_joint"))]
+        self.jaw_q = np.array([int(m.jnt_qposadr[j]) for j in jaws])
+        self.jaw_v = np.array([int(m.jnt_dofadr[j]) for j in jaws])
+        self.jaw0 = self.data.qpos[self.jaw_q].copy()
 
     @property
     def data(self):
         return self.task.env.current_data
+
+    def restore_jaws(self, gripper_controller) -> None:
+        """The jaws back to the episode's start opening (free of contact, at the end of a reset); the measured jaws'
+        emulator restarts from there."""
+        import mujoco
+
+        d = self.data
+        d.qpos[self.jaw_q] = self.jaw0
+        d.qvel[self.jaw_v] = 0.0
+        mujoco.mj_forward(self.model, d)
+        if gripper_controller is not None:
+            gripper_controller.reset()
 
     def drawer_m(self) -> float:
         return float(self.data.qpos[self.slide])
@@ -174,7 +201,10 @@ class DrawerSim:
         return left and right
 
     def success(self) -> bool:
-        return bool(self.task.judge_success())
+        """The target drawer open past the task's threshold (the task's own rule, on this drawer only). The task's
+        judge_success takes the most-open joint of every articulated object in the scene (xemb's "BUG5", fixed there
+        only under SANITY_LOWVAR with a joint index): a cabinet front dragged open counted as the drawer."""
+        return abs(self.drawer_m()) / self.slide_range >= self.threshold
 
 
 class DrawerMonitor:
@@ -310,6 +340,7 @@ def make_policy_class():
             self.attempts, self.decisions, self.queue = [], [], []
             self.last = None          # the last command sent: {"arm", "gripper", "base"}
             self.grip_closed, self.open_run = False, 0     # the gripper latch (GRIP_RELEASE_STEPS)
+            self.jaws_restored = True                     # set False by each reset (settle)
             self.settle_left = 0      # policy steps left to wait for the reset to arrive
             self.settle_steps = self.reset_steps = 0
             self.done = False
@@ -411,14 +442,22 @@ def make_policy_class():
 
             out = [{"arm": arm, "gripper": opened, "base": world(here)}] * self.n(RESET_OPEN_S)
             out += drive(arm, here, back)
-            q = np.asarray(o["qpos"]["arm"], float)[:7]      # held there (mode 7, then the base's hold) until now
-            n = max(self.n(RESET_HOME_S), int(np.ceil(np.abs(self.arm0 - q).max() / JOINT_STEP_RAD)))
-            out += [{"arm": q + (self.arm0 - q) * i / n, "gripper": opened, "base": world(back),
-                     "joint": q + (self.arm0 - q) * i / n} for i in range(1, n + 1)]
+            n = self.n(RESET_HOME_S)
+            out += [{"arm": arm + (self.arm0 - arm) * i / n, "gripper": opened, "base": world(back)}
+                    for i in range(1, n + 1)]
+            out.append({JOINT_HOME: True, "gripper": opened, "base": world(back)})    # expanded in get_action
             out += [dict(c, joint=self.arm0) for c in drive(self.arm0, back, np.zeros(3))]
             self.settle_left, self.settle_steps, self.reset_steps = self.n(RESET_SETTLE_MAX_S), 0, len(out)
+            self.jaws_restored = False
             self.vtarget = out[-1]["base"].copy()
             return out
+
+        def joint_home(self, o: dict, marker: dict) -> list[dict]:
+            """The joint-space path from the measured joints (the hand home by now) to the start joints."""
+            q = np.asarray(o["qpos"]["arm"], float)[:7]
+            n = max(1, int(np.ceil(np.abs(self.arm0 - q).max() / JOINT_STEP_RAD)))
+            return [{"arm": q + (self.arm0 - q) * i / n, "gripper": marker["gripper"], "base": marker["base"],
+                     "joint": q + (self.arm0 - q) * i / n} for i in range(1, n + 1)]
 
         def base_error(self, o: dict) -> np.ndarray:
             """The start pose minus the base's pose, world frame, yaw wrapped."""
@@ -430,7 +469,12 @@ def make_policy_class():
             """One step of the reset's final hold: steer the base onto its start; None once the robot has arrived."""
             e = self.base_error(o)
             base_ok = np.linalg.norm(e[:2]) < RESET_TOL_M and abs(e[2]) < RESET_TOL_YAW
-            if base_ok and np.linalg.norm(self.sim.tcp_in_base() - self.tcp0) < RESET_TOL_TCP_M:
+            arrived = base_ok and np.linalg.norm(self.sim.tcp_in_base() - self.tcp0) < RESET_TOL_TCP_M
+            if (arrived or self.settle_left <= 1) and not self.jaws_restored:
+                self.sim.restore_jaws(self.controllers().get("gripper"))    # one more hold step: the next
+                self.jaws_restored = True                                   # observation shows them restored
+                return {"arm": self.arm0, "gripper": np.array([0.0]), "base": self.vtarget.copy(), "joint": self.arm0}
+            if arrived:
                 return None
             if not base_ok:      # the teleop reads the target's motion as the velocity
                 self.vtarget = self.vtarget + np.clip(RESET_GAIN * e, -BASE_CAPS, BASE_CAPS) * self.dt
@@ -470,6 +514,8 @@ def make_policy_class():
                         return None
                     self.start_attempt(k + 1, o)
             if self.queue:
+                if JOINT_HOME in self.queue[0]:
+                    self.queue[:1] = self.joint_home(o, self.queue[0])
                 cmd = self.queue.pop(0)
                 if DEBUG:
                     q = o["qpos"]
@@ -500,9 +546,12 @@ def make_policy_class():
             self.step += 1
             return {k: np.asarray(v, float).copy() for k, v in cmd.items() if k != "joint"}
 
+        def controllers(self) -> dict:
+            return getattr(self.task.env.current_robot, "_controllers", {})
+
         def joint_target(self, q) -> None:
             """Joint homing (JOINT_STEP_RAD above): the arm's servos follow ``q``; None hands the arm back to mode 7."""
-            c = getattr(self.task.env.current_robot, "_controllers", {}).get("arm")
+            c = self.controllers().get("arm")
             if hasattr(c, "_held_q"):           # the measured command path's arm (install_joint_homing)
                 c.help_joint_target = None if q is None else np.asarray(q, float).copy()
 
