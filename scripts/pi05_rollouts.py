@@ -115,7 +115,7 @@ def collect(a, trees: bool) -> None:
                 nodes, frames = ro.run_tree(policy, seed, a.max_attempts, a.samples)
                 np.savez_compressed(odir / f"tree_{seed:05d}.npz", **{f"{p or 'root'}/{cam}": img
                                                                      for p, cams in frames.items() for cam, img in cams.items()})
-                rec = {"nodes": nodes}
+                rec = {"nodes": nodes, "start_obj_pos": ro.env.start_obj[0].tolist(), "target": ro.env.target.tolist()}
                 ok = any(n["outcome"] == "success" for n in nodes)
             else:
                 rec = ro.run_episode(policy, np.random.default_rng(seed), decide, a.max_attempts, a.samples)

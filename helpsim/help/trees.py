@@ -89,7 +89,7 @@ def load_trees(root: Path, family: str) -> list[Tree]:
             if not line:
                 continue
             r = json.loads(line)
-            nodes = {n["path"]: n for n in r["nodes"]}
+            nodes = {n["path"]: {"fail_phase": None, **n} for n in r["nodes"]}   # pi0.5 trees record no phase
             split = r.get("split") or ("heldout_in_distribution" if r["object"] == "orange" else
                                        "heldout_hard" if r["object"] == "metal_spoon" else "train")
             start = r.get("start_obj_pos") or nodes[""]["state"]["obj_pos"]
