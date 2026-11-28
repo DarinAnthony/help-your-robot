@@ -13,7 +13,9 @@ is how hard the task really is (easy, recoverable, or infeasible), and compare w
 planner with a learned difficulty prior earns 1.37 reward per episode, against 0.60 for never asking, −3.00 for always
 asking, 0.59 for asking after two failures, and 1.00 for thresholding a learned success predictor (the main baseline).
 The gain over the success predictor is borderline (+0.37, 95% CI [0.00, 0.75]). Ablations show it comes from the
-learned start-state prior and from choosing *how* to retry, not from planning ahead.
+learned start-state prior and from choosing *how* to retry, not from planning ahead. Letting the observation model
+depend on the previous failure (a post-hoc ablation) makes the gain over the success predictor clear: +0.40
+[0.04, 0.78] at the default costs, and significant in 14 of 15 cost settings.
 
 ## 1. Introduction
 
@@ -126,7 +128,8 @@ transitions, using the same features as V0; Q(ask) = −c_help. This is our "hel
 policy can do).
 
 **Ablations.** A1 uniform prior; A2 training-frequency prior (same for every start); A3 outcomes collapsed to
-success/failure; A4 no adjust action; A5 prior from images instead of features.
+success/failure; A4 no adjust action; A5 prior from images instead of features; A7 observation model that also
+conditions on the previous attempt's outcome (§6.5).
 
 **Statistics.** Mean reward per episode with 95% bootstrap CIs (10,000 resamples); differences between methods are
 paired by test start.
@@ -181,6 +184,7 @@ looked at it.*
 |---|---|---|
 | Ours | 1.37 | — |
 | B8 QMDP (no information-gathering lookahead) | 1.38 | −0.01 [−0.14, +0.12] |
+| A7 + previous outcome (§6.5) | 1.40 | −0.03 [−0.28, +0.22] |
 | A3 success/failure only (no failure types) | 1.37 | −0.00 [−0.16, +0.15] |
 | A5 image prior instead of feature prior | 1.12 | +0.25 [+0.00, +0.51] |
 | A4 no adjust action | 0.56 | +0.81 [+0.52, +1.12] |
@@ -231,10 +235,40 @@ The reason is a modelling choice. Ours's observation model P(outcome | d, a, k) 
 came before. In training, after an unreachable first attempt on a recoverable start, adjusting succeeds 8 of 71 times
 and repeating succeeds 1 of 71. But averaged over all histories, the model estimates P(success | recoverable, second
 attempt) at 0.29 for repeating and 0.15 for adjusting, so it repeats. This also explains why failure types do not help
-in the A3 ablation: they update the belief about difficulty, but never inform which retry to choose. Conditioning the
-observation model on the previous outcome is the obvious fix (§9).
+in the A3 ablation: they update the belief about difficulty, but never inform which retry to choose.
 
-### 6.5 Robustness across costs
+### 6.5 Fixing it: conditioning on the previous outcome (A7)
+
+A7 replaces P(o | d, a, k) with P(o | d, a, k, o_prev), where o_prev is the previous attempt's outcome. To cope with
+sparse histories, each conditional distribution is shrunk toward the pooled one with a pseudo-count strength tuned on
+the calibration split (from {0.5, 1, 2, 5, 10, 25}; 0.5 is chosen in 13 of 15 settings). Belief updates and planning
+carry o_prev along; nothing else changes.
+
+| c_help, c_fail | A7 | A7 − Ours (95% CI) | A7 − B6 (95% CI) |
+|---|---|---|---|
+| 3, 0.5 (default) | 1.40 | +0.03 [−0.22, +0.28] | **+0.40 [+0.04, +0.78]** |
+| 3, 1 | 1.06 | +0.25 [+0.06, +0.47] | +0.52 [+0.20, +0.86] |
+| 3, 2 | 0.51 | +0.37 [+0.21, +0.56] | +0.37 [+0.06, +0.69] |
+| 8, 2 | −2.56 | +0.60 [+0.32, +0.92] | +0.78 [+0.35, +1.23] |
+
+Over all 15 cost settings (full table in `reports/help_eval/expert/summary.md`):
+
+- **A7 beats B6 in 14 of 15**, with the CI excluding zero (the exception is c_help = 1, c_fail = 2: +0.20
+  [−0.06, +0.45]). This turns C2 from borderline into a clear result.
+- **A7 beats Ours in 8 of 15** and is never significantly worse. Its gains come at higher failure costs: at
+  c_fail = 0.5 it ties Ours.
+- At the default costs, A7 acts differently from Ours on 86 of 488 test starts. It earns more on 21 (16 of them
+  recoverable: it finds the adjust that works) and less on 35 (19 infeasible, 10 easy, 6 recoverable). Counting
+  successes: A7 wins 11 that Ours loses and loses 9 that Ours wins; most other differences are one failed attempt
+  (±0.5). The net is a tie.
+- It does not rescue the drumstick episode in Figure 3b: it adjusts first, fails, and asks (−3.5 instead of −4.5).
+
+**Caveat.** We designed A7 after looking at a test episode (Figure 3b). The evidence that motivates it (adjust 8/71
+vs. repeat 1/71 after "unreachable") is from the training split, and its one hyperparameter is tuned on calibration,
+but the choice to try it was informed by the test set. Report it as a post-hoc ablation, not as the pre-registered
+main method.
+
+### 6.6 Robustness across costs
 
 TODO (team): two or three sentences from the second table of `reports/help_eval/expert/summary.md`. Points to make:
 QMDP is the best other method in 14 of 15 settings and ties Ours within ±0.04 in most; Ours is significantly worse than
@@ -274,13 +308,14 @@ test episodes, the results are too noisy to rank methods.
 - Simulation only. The kitchen asset set has no cups; held-out generalisation is tested with the orange and the metal
   spoon only.
 - Scoring is offline on trees. We did not run the policies closed-loop on fresh starts (optional check, see the plan).
-- The observation model ignores the previous failure type when choosing the next action (§6.4).
+- Ours's observation model ignores the previous failure type when choosing the next action (§6.4). A7 fixes this,
+  but it was designed after looking at a test episode (§6.5).
 - The help cost is a constant; a real person's cost depends on context.
 
 ## 9. Conclusion and future work
 
-TODO (team): two short paragraphs. Future work: condition the observation model on the previous outcome (a
-history-dependent POMDP); an INSPECT action that gathers information before acting; closed-loop and real-robot
+TODO (team): two short paragraphs. Future work: confirm A7 on fresh starts collected after this analysis, and
+condition on longer histories (the previous action as well as its outcome); an INSPECT action that gathers information before acting; closed-loop and real-robot
 evaluation; more pi0.5 data so the learned-policy results can rank methods.
 
 ## Appendix: reproducing the numbers

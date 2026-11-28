@@ -35,6 +35,8 @@ C_FAIL = (0.5, 1, 2)
 DEFAULT = (3, 0.5)
 TAUS = np.linspace(0, 1, 51)
 B = 10_000
+A7 = "A7 Ours + previous outcome"
+PREV_STRENGTHS = (0.5, 1, 2, 5, 10, 25)      # A7's back-off pseudo-counts, tuned on cal
 
 
 def group(t) -> str:
@@ -129,6 +131,7 @@ def evaluate(trees, family, rng, costs_grid, emb=None, spread_key: str = "arm_st
     if has_spread:      # pi0.5's drawer runs: its spread at each decision point (5 sampled chunks)
         obs_spread = P.ObservationModel(spec, travel_bins=P.DRAWER_TRAVEL_BINS, spread_key=spread_key).fit(train)
     onehot = lambda t: np.eye(3)[DIFFICULTIES.index(t.difficulty)]
+    rng_a7 = np.random.default_rng(7)
     Vs, heads = {"V0": V}, {"difficulty": head}
     if emb is not None:     # V1 and the image prior (scripts/embed_trees.py)
         t0 = time.time()
@@ -188,10 +191,21 @@ def evaluate(trees, family, rng, costs_grid, emb=None, spread_key: str = "arm_st
                                       "reward_ci": boot_ci(np.array(list(o2.values())), rng)}
             diffs = {name: paired(rows["Ours belief POMDP"], r, rng) for name, r in rows.items()
                      if name != "Ours belief POMDP"}
+            a7 = {}
+            if family == "expert":
+                # A7: the observation model also conditions on the previous attempt's outcome (backing off to the
+                # pooled model with strength tuned on cal). Its own rng, so adding it leaves every other number as is.
+                make7 = lambda g: P.BeliefPlanner(P.ObservationModel(spec, prev=g).fit(train), head, c)
+                s7, _ = tune(cal, make7, PREV_STRENGTHS, c)
+                r7 = score(test, make7(s7), c)
+                summ[A7] = summarize(r7, o2, rng_a7)
+                diffs[A7] = paired(rows["Ours belief POMDP"], r7, rng_a7)
+                a7 = {"prev_strength": float(s7), "minus_b6": paired(r7, rows["B6 Vk threshold"], rng_a7),
+                      "minus_b8": paired(r7, rows["B8 QMDP"], rng_a7)}
             tuned_v1 = {"tau_B6'": float(tau6i)} if emb is not None else {}
             res["costs"][f"{c_help},{c_fail}"] = {"c_help": c_help, "c_fail": c_fail, "tuned": {**tuned_v1, "tau_B6": float(tau6),
                                                   "tau_B5": float(tau5), "k_B3": k_best, "q_B4": q},
-                                                  "methods": summ, "ours_minus": diffs}
+                                                  "methods": summ, "ours_minus": diffs, **({"a7": a7} if a7 else {})}
             print(f"c_help {c_help} c_fail {c_fail}: Ours {summ['Ours belief POMDP']['reward']:.2f}  "
                   f"B6 {summ['B6 Vk threshold']['reward']:.2f}  B1 {summ['B1 never ask']['reward']:.2f}  "
                   f"O2 {summ['O2 clairvoyant']['reward']:.2f}  ({time.time() - t0:.0f}s)", flush=True)
@@ -353,6 +367,17 @@ def summary_md(res: dict, family: str, figs: list[str]) -> str:
         L.append(f"| {cc['c_help']} | {cc['c_fail']} | {m['Ours belief POMDP']['reward']:.2f} | {m['B6 Vk threshold']['reward']:.2f} | "
                  f"{d6['diff']:+.2f} [{d6['ci'][0]:+.2f}, {d6['ci'][1]:+.2f}] | {best} ({others[best]['reward']:.2f}) | "
                  f"{db['diff']:+.2f} [{db['ci'][0]:+.2f}, {db['ci'][1]:+.2f}] |")
+    if all("a7" in cc for cc in res["costs"].values()):
+        L += ["", f"## {A7} over the cost grid: P(o | d, k, a, previous outcome), backing off to P(o | d, k, a)", "",
+              "| c_help | c_fail | back-off strength | A7 | A7 − Ours (95% CI) | A7 − B6 (95% CI) | A7 − B8 QMDP (95% CI) |",
+              "|---|---|---|---|---|---|---|"]
+        for cc in res["costs"].values():
+            a, m = cc["a7"], cc["methods"]
+            ci = lambda d: f"{d['diff']:+.2f} [{d['ci'][0]:+.2f}, {d['ci'][1]:+.2f}]"
+            do = cc["ours_minus"][A7]["all"]
+            L.append(f"| {cc['c_help']} | {cc['c_fail']} | {a['prev_strength']:g} | {m[A7]['reward']:.2f} | "
+                     f"{-do['diff']:+.2f} [{-do['ci'][1]:+.2f}, {-do['ci'][0]:+.2f}] | {ci(a['minus_b6']['all'])} | "
+                     f"{ci(a['minus_b8']['all'])} |")
     L += ["", "## Predictors on test (V_k: P(success | the default continuation); V0 hand features, V1 DINOv2 frames + proprioception + history)", "",
           "| predictor | n | base rate | AUROC | Brier | NLL | ECE |", "|---|---|---|---|---|---|---|"]
     for k, s in res["predictors"].items():

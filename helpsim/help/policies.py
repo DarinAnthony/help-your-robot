@@ -189,8 +189,11 @@ class ObservationModel:
     the drawer by its travel bin (``travel_bins``); ``coarse`` keeps only success / failure / terminal failure types."""
 
     def __init__(self, family_spec: dict, coarse: bool = False, alpha: float = 0.5, travel_bins: tuple | None = None,
-                 spread_key: str | None = None):
+                 spread_key: str | None = None, prev: float | None = None):
         self.spec, self.coarse, self.alpha, self.bins = family_spec, coarse, alpha, travel_bins
+        # ``prev`` (A7): also condition on the previous attempt's symbol, P(o | d, k, a, o_prev), shrunk toward
+        # P(o | d, k, a) with strength ``prev`` (pseudo-counts), so sparse histories back off to the pooled model.
+        self.prev = prev
         tf = family_spec["terminal_fail"]
         if coarse:
             self.outcomes = ("success", "fail") + tuple(tf)
@@ -228,6 +231,8 @@ class ObservationModel:
                     if p and n["outcome"] != "success" and (n["state"].get("spread") or {}).get(self.spread_key) is not None]
             self.spread_thr = float(np.median(vals)) if vals else None
         n = np.full((len(DIFFICULTIES), MAX_ATTEMPTS, len(acts), len(self.outcomes)), self.alpha)
+        # by previous symbol: index len(outcomes) is "no previous attempt" (k = 0)
+        nh = np.zeros((len(DIFFICULTIES), MAX_ATTEMPTS, len(acts), len(self.outcomes) + 1, len(self.outcomes)))
         for t in train:
             d = DIFFICULTIES.index(t.difficulty)
             for path, node in t.nodes.items():
@@ -236,12 +241,23 @@ class ObservationModel:
                 parent, a, k = path[:-1], path[-1], len(path) - 1
                 if t.terminal(t.nodes[parent]["outcome"]):
                     continue
-                n[d, k, acts.index(a), self.outcomes.index(self.obs(node["outcome"], node["state"]))] += 1
+                j = self.outcomes.index(self.obs(node["outcome"], node["state"]))
+                n[d, k, acts.index(a), j] += 1
+                pn = t.nodes[parent]
+                nh[d, k, acts.index(a), self._prev_index(self.obs(pn["outcome"], pn["state"]) if parent else None), j] += 1
         self.p = n / n.sum(-1, keepdims=True)
+        if self.prev is not None:
+            self.ph = (nh + self.prev * self.p[:, :, :, None, :]) / (nh.sum(-1, keepdims=True) + self.prev)
         return self
 
-    def __call__(self, d: int, k: int, a: str) -> np.ndarray:
-        return self.p[d, k, self.acts.index(a)]
+    def _prev_index(self, sym: str | None) -> int:
+        return len(self.outcomes) if sym is None else self.outcomes.index(sym)
+
+    def __call__(self, d: int, k: int, a: str, prev: str | None = None) -> np.ndarray:
+        """P(o | d, k, a), or with ``prev`` set at construction P(o | d, k, a, previous symbol ``prev``)."""
+        if self.prev is None:
+            return self.p[d, k, self.acts.index(a)]
+        return self.ph[d, k, self.acts.index(a), self._prev_index(prev)]
 
 
 # ---------------------------------------------------------------- planners
@@ -253,13 +269,18 @@ class BeliefPlanner:
         self.allowed = actions
         self._vd = {}
 
+    def _symbols(self, v: dict) -> list[str]:
+        """The observation symbol of each past attempt."""
+        return [self.obs.obs(o, v["tree"].nodes[v["path"][:i + 1]]["state"]) for i, (o, _ph) in enumerate(v["history"])]
+
     def belief(self, v: dict) -> np.ndarray:
         b = np.asarray(self.prior(v["tree"]), float).copy()
-        for i, (o, _ph) in enumerate(v["history"]):
+        prev = None
+        for i, sym in enumerate(self._symbols(v)):
             a = v["path"][i]
-            sym = self.obs.obs(o, v["tree"].nodes[v["path"][:i + 1]]["state"])
-            b *= np.array([self.obs(d, i, a)[self.obs.outcomes.index(sym)] for d in range(len(b))])
+            b *= np.array([self.obs(d, i, a, prev)[self.obs.outcomes.index(sym)] for d in range(len(b))])
             b /= b.sum()
+            prev = sym
         return b
 
     def _acts(self, k: int) -> tuple:
@@ -273,18 +294,20 @@ class BeliefPlanner:
             return -self.c.c_fail, False
         return outcome_reward(o, self.c, self.obs.terminal_fail)
 
-    def value(self, b: np.ndarray, k: int) -> float:
-        return max(self.q(b, k).values())
+    def value(self, b: np.ndarray, k: int, prev: str | None = None) -> float:
+        return max(self.q(b, k, prev).values())
 
-    def q(self, b: np.ndarray, k: int) -> dict:
+    def q(self, b: np.ndarray, k: int, prev: str | None = None) -> dict:
+        """Q values at belief b before attempt k; ``prev`` is the last attempt's symbol (used only by an observation
+        model built with ``prev``)."""
         if k >= MAX_ATTEMPTS:
             return {"ask": -self.c.c_help}
         out = {"ask": -self.c.c_help}
         for a in self._acts(k):
             if self.mode == "qmdp":
-                out[a] = float(sum(b[d] * self.q_known(d, k)[a] for d in range(len(b))))
+                out[a] = float(sum(b[d] * self.q_known(d, k, prev)[a] for d in range(len(b))))
                 continue
-            P = np.array([self.obs(d, k, a) for d in range(len(b))])     # (D, O)
+            P = np.array([self.obs(d, k, a, prev) for d in range(len(b))])     # (D, O)
             po = b @ P
             total = 0.0
             for j, o in enumerate(self.obs.outcomes):
@@ -292,14 +315,14 @@ class BeliefPlanner:
                     continue
                 r, done = self._step(o)
                 if not done:
-                    r += self.value(b * P[:, j] / po[j], k + 1)
+                    r += self.value(b * P[:, j] / po[j], k + 1, o)
                 total += po[j] * r
             out[a] = total
         return out
 
-    def q_known(self, d: int, k: int) -> dict:
+    def q_known(self, d: int, k: int, prev: str | None = None) -> dict:
         """Q values with the difficulty known (the per-d MDP)."""
-        key = (d, k)
+        key = (d, k, prev)
         if key not in self._vd:
             if k >= MAX_ATTEMPTS:
                 self._vd[key] = {"ask": -self.c.c_help}
@@ -308,17 +331,18 @@ class BeliefPlanner:
                 for a in self._acts(k):
                     total = 0.0
                     for j, o in enumerate(self.obs.outcomes):
-                        p = self.obs(d, k, a)[j]
+                        p = self.obs(d, k, a, prev)[j]
                         r, done = self._step(o)
                         if not done:
-                            r += max(self.q_known(d, k + 1).values())
+                            r += max(self.q_known(d, k + 1, o).values())
                         total += p * r
                     out[a] = total
                 self._vd[key] = out
         return self._vd[key]
 
     def __call__(self, v: dict) -> str:
-        q = self.q(self.belief(v), v["k"])
+        syms = self._symbols(v)
+        q = self.q(self.belief(v), v["k"], syms[-1] if syms else None)
         q = {a: x for a, x in q.items() if a == "ask" or a in v["actions"]}
         return max(q, key=q.get)
 

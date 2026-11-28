@@ -20,7 +20,7 @@ asking, or requesting help after a fixed number of failed attempts."*
 | Claim | Comparison | Status (scripted expert, shelf, 488 test starts, default costs) |
 |---|---|---|
 | **C1 (must have).** A learned predictor beats the simple rules | V threshold (B6) and Ours vs. never ask / always ask / ask after k | **Holds.** Never ask 0.60, ask after 2 0.59, always ask −3.00; B6 1.00, Ours 1.37. Ours − never ask = +0.77 [0.37, 1.17]. |
-| **C2 (main question).** Belief planning beats the value function alone | Ours (belief POMDP) vs. B6 | **Borderline.** +0.37 [0.00, 0.75]. The CI excludes 0 in 5 of 15 cost settings; Ours is never significantly worse. |
+| **C2 (main question).** Belief planning beats the value function alone | Ours (belief POMDP) vs. B6 | **Borderline.** +0.37 [0.00, 0.75]. The CI excludes 0 in 5 of 15 cost settings; Ours is never significantly worse. **Post-hoc ablation A7** (observation model conditioned on the previous outcome, added 2026-11-28): +0.40 [0.04, 0.78] over B6, significant in 14 of 15 settings. It was designed after looking at a test episode, so report it as an ablation, not the main method. |
 | **C3 (RL help model, from the Game Plan).** An offline-RL help policy | B9 fitted Q-iteration vs. the rest | Done: 0.93 at default costs. Better than the simple rules, worse than Ours (+0.44 [0.21, 0.67] for Ours). |
 | **C4 (secondary).** The pipeline runs on a learned policy | pi0.5 shelf and drawer | Runs end to end. Too few test episodes to rank the methods. Drawer: 29 test episodes; at default costs every learned method ties never-ask, and with c_fail = 2 Ours and QMDP beat it by +0.21 [0.00, 0.41] (61ee697). Shelf: 21 starts, 17 of them impossible. |
 
